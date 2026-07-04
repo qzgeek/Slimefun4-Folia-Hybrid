@@ -74,9 +74,18 @@ class CargoNetworkTask implements Runnable {
             for (Map.Entry<Location, Integer> entry : inputs.entrySet()) {
                 long nodeTimestamp = System.nanoTime();
                 Location input = entry.getKey();
-                Optional<Block> attachedBlock = network.getAttachedBlock(input);
 
-                attachedBlock.ifPresent(block -> routeItems(input, block, entry.getValue()));
+                // 输入节点跨区域检测
+                boolean inputCrossRegion = Slimefun.isFolia()
+                        && !FoliaRegionHelper.isSameRegion(network.getRegulator(), input);
+
+                if (inputCrossRegion) {
+                    // 在输入节点所在区域线程上处理
+                    processInputInRegion(input, entry.getValue(), inputNode);
+                } else {
+                    Optional<Block> attachedBlock = network.getAttachedBlock(input);
+                    attachedBlock.ifPresent(block -> routeItems(input, block, entry.getValue()));
+                }
 
                 timestamp += Slimefun.getProfiler().closeEntry(entry.getKey(), inputNode, nodeTimestamp);
             }
@@ -87,6 +96,38 @@ class CargoNetworkTask implements Runnable {
         }
 
         Slimefun.getProfiler().closeEntry(network.getRegulator(), SlimefunItems.CARGO_MANAGER.getItem(), timestamp);
+    }
+
+    /**
+     * 在输入节点的区域线程上处理跨区域输入。
+     * 派发到目标区域执行 withdraw + distribute，然后异步等待结果。
+     */
+    private void processInputInRegion(Location input, int frequency, SlimefunItem inputNode) {
+        World world = input.getWorld();
+        if (world == null) return;
+
+        int cx = input.getBlockX() >> 4;
+        int cz = input.getBlockZ() >> 4;
+        if (!world.isChunkLoaded(cx, cz)) return;
+
+        try {
+            CompletableFuture<Void> future = new CompletableFuture<>();
+            Slimefun.runSyncAtLocation(() -> {
+                try {
+                    Optional<Block> attachedBlock = network.getAttachedBlock(input);
+                    if (attachedBlock.isPresent()) {
+                        routeItems(input, attachedBlock.get(), frequency);
+                    }
+                    future.complete(null);
+                } catch (Exception e) {
+                    future.completeExceptionally(e);
+                }
+            }, input);
+            future.get(CROSS_REGION_TIMEOUT, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            Slimefun.logger().log(Level.WARNING,
+                    "货网跨区域输入处理异常 @ {0}", new BlockPosition(input));
+        }
     }
 
     @ParametersAreNonnullByDefault
