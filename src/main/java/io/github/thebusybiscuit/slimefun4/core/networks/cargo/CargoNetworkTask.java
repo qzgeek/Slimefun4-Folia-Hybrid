@@ -163,49 +163,82 @@ class CargoNetworkTask implements Runnable {
             outIdx++;
         }
 
-        // Phase 2: same-region full → try cross-region (fire-and-forget)
+        // Phase 2: same-region full → try cross-region (同步等待)
+        int crossIdx = 0;
         for (Location output : crossRegion) {
             World w = output.getWorld();
             if (w == null) continue;
             if (!w.isChunkLoaded(output.getBlockX() >> 4, output.getBlockZ() >> 4)) continue;
 
-            final ItemStack cloned = item.clone();
-            Slimefun.runSyncAtLocation(() -> {
-                try {
-                    Optional<Block> target = network.getAttachedBlock(output);
-                    if (target.isEmpty()) { returnItemToSource(cloned, inputNode); return; }
-                    ItemStackWrapper wrapper = ItemStackWrapper.wrap(cloned);
-                    ItemStack remainder = CargoUtils.insert(
-                            network, inventories, output.getBlock(), target.get(), smartFill, cloned, wrapper);
-                    if (remainder != null) returnItemToSource(remainder, inputNode);
-                } catch (Exception e) {
-                    returnItemToSource(cloned, inputNode);
+            // 多线程 Folia：manager 线程等 target 线程，不同线程不死锁
+            // 单线程 Folia：runSyncAtLocation 内置 isOwnedByCurrentRegion 短路，直接执行
+            final ItemStack toSend = item.clone();
+            final int savedOutIdx = crossIdx;
+            try {
+                java.util.concurrent.CompletableFuture<ItemStack> future =
+                    new java.util.concurrent.CompletableFuture<>();
+                ItemStackWrapper wrapper = ItemStackWrapper.wrap(toSend);
+
+                Slimefun.runSyncAtLocation(() -> {
+                    try {
+                        Optional<Block> target = network.getAttachedBlock(output);
+                        if (target.isEmpty()) { future.complete(toSend); return; }
+                        ItemStack remainder = CargoUtils.insert(
+                                network, inventories, output.getBlock(), target.get(),
+                                smartFill, toSend, wrapper);
+                        future.complete(remainder);
+                    } catch (Exception e) {
+                        future.completeExceptionally(e);
+                    }
+                }, output);
+
+                ItemStack remainder = future.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                if (remainder == null) {
+                    // 插入成功
+                    if (roundrobin) network.roundRobin.put(inputNode,
+                            (sameRegion.size() + savedOutIdx + 1) % outputNodes.size());
+                    return null;
                 }
-            }, output);
-            return null;
+                // remainder != null → 输出拒绝/满 → 尝试下一个跨区域输出
+                item = remainder;
+            } catch (java.util.concurrent.TimeoutException e) {
+                // 超时：物品退回输入端，不丢
+                Slimefun.logger().log(Level.WARNING,
+                        "货网跨区域传输超时 @ {0}", new BlockPosition(output));
+                returnItemToSourceSync(inputNode, item);
+                return null;
+            } catch (Exception e) {
+                returnItemToSourceSync(inputNode, item);
+                return null;
+            }
+            crossIdx++;
         }
 
         return item;
     }
 
-    private void returnItemToSource(ItemStack item, Location sourceInput) {
+    /**
+     * 同步归还物品到输入端（在当前线程上执行）。
+     * 用于跨区域传输失败后的回退。
+     */
+    private void returnItemToSourceSync(Location sourceInput, ItemStack item) {
         if (manager.isItemDeletionEnabled()) return;
-        Slimefun.runSyncAtLocation(() -> {
-            try {
-                Optional<Block> attached = network.getAttachedBlock(sourceInput);
-                if (attached.isEmpty()) return;
-                Inventory inv = inventories.get(sourceInput);
-                if (inv != null) {
-                    ItemStack rest = Slimefun.getItemStackService()
-                        .addItem(inv, item, InventoryContext.CARGO_INSERT);
-                    if (rest != null && !manager.isItemDeletionEnabled()) {
-                        SlimefunUtils.spawnItem(sourceInput.clone().add(0, 1, 0), rest, ItemSpawnReason.CARGO_OVERFLOW);
-                    }
+        try {
+            Optional<Block> attached = network.getAttachedBlock(sourceInput);
+            if (attached.isEmpty()) return;
+            Inventory inv = inventories.get(sourceInput);
+            if (inv != null) {
+                ItemStack rest = Slimefun.getItemStackService()
+                    .addItem(inv, item, InventoryContext.CARGO_INSERT);
+                if (rest != null && !manager.isItemDeletionEnabled()) {
+                    SlimefunUtils.spawnItem(sourceInput.clone().add(0, 1, 0),
+                            rest, ItemSpawnReason.CARGO_OVERFLOW);
                 }
-            } catch (Exception e) {
-                Slimefun.logger().log(Level.WARNING, "货网跨区域归还物品异常 @ {0}", new BlockPosition(sourceInput));
             }
-        }, sourceInput);
+        } catch (Exception e) {
+            Slimefun.logger().log(Level.WARNING,
+                    "货网跨区域归还异常 @ {0}", new BlockPosition(sourceInput));
+        }
     }
 
     @ParametersAreNonnullByDefault
