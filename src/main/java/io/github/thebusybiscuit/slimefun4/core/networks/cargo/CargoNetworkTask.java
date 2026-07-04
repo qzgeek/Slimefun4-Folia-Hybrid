@@ -12,13 +12,10 @@ import io.github.thebusybiscuit.slimefun4.implementation.SlimefunItems;
 import io.github.thebusybiscuit.slimefun4.utils.SlimefunUtils;
 import io.github.thebusybiscuit.slimefun4.utils.itemstack.ItemStackWrapper;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.logging.Level;
 import javax.annotation.Nullable;
@@ -30,24 +27,11 @@ import org.bukkit.block.Block;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 
-/**
- * The {@link CargoNetworkTask} is responsible for moving {@link ItemStack ItemStacks}
- * around the {@link CargoNet}.
- *
- * <h3>Folia 跨区域支持</h3>
- * 跨区域传输使用火焰遗弃 (fire-and-forget) 模式：在输入端所在的线程抽取物品，
- * 然后将插入操作派发到输出端所在的区域线程，不等待结果。
- * 如果目标未加载则安全跳过。不阻塞任何区域线程。
- *
- * @author TheBusyBiscuit
- * @author qzgeek (Folia 跨区域改造)
- */
 class CargoNetworkTask implements Runnable {
 
     private final NetworkManager manager;
     private final CargoNet network;
     private final Map<Location, Inventory> inventories = new HashMap<>();
-
     private final Map<Location, Integer> inputs;
     private final Map<Integer, List<Location>> outputs;
 
@@ -62,7 +46,6 @@ class CargoNetworkTask implements Runnable {
     @Override
     public void run() {
         long timestamp = System.nanoTime();
-
         try {
             SlimefunItem itemType = SlimefunItems.CARGO_INPUT_NODE.getItem();
             for (Map.Entry<Location, Integer> entry : inputs.entrySet()) {
@@ -82,18 +65,12 @@ class CargoNetworkTask implements Runnable {
                 timestamp += Slimefun.getProfiler().closeEntry(entry.getKey(), itemType, nodeTimestamp);
             }
         } catch (Exception | LinkageError x) {
-            Slimefun.logger()
-                    .log(Level.SEVERE, x,
-                            () -> "货网 tick 异常 @ " + new BlockPosition(network.getRegulator()));
+            Slimefun.logger().log(Level.SEVERE, x,
+                    () -> "货网 tick 异常 @ " + new BlockPosition(network.getRegulator()));
         }
-
         Slimefun.getProfiler().closeEntry(network.getRegulator(), SlimefunItems.CARGO_MANAGER.getItem(), timestamp);
     }
 
-    /**
-     * 跨区域输入：派发整个 routeItems 到输入节点所在的区域线程。
-     * 火焰遗弃，不等待结果。
-     */
     private void processCrossRegionInput(Location input, int frequency) {
         World world = input.getWorld();
         if (world == null) return;
@@ -107,8 +84,7 @@ class CargoNetworkTask implements Runnable {
                     routeItems(input, attachedBlock.get(), frequency);
                 }
             } catch (Exception e) {
-                Slimefun.logger().log(Level.WARNING,
-                        "货网跨区域输入异常 @ {0}", new BlockPosition(input));
+                Slimefun.logger().log(Level.WARNING, "货网跨区域输入异常 @ {0}", new BlockPosition(input));
             }
         }, input);
     }
@@ -117,6 +93,21 @@ class CargoNetworkTask implements Runnable {
     private void routeItems(Location inputNode, Block inputTarget, int frequency) {
         List<Location> destinations = outputs.get(frequency);
         if (destinations == null || destinations.isEmpty()) return;
+
+        // 检查所有输出节点：如有跨区域节点且目标未加载，跳过本次传输
+        if (Slimefun.isFolia()) {
+            boolean allUnloaded = true;
+            for (Location dest : destinations) {
+                if (FoliaRegionHelper.isSameRegion(inputNode, dest)) {
+                    allUnloaded = false; break;
+                }
+                World w = dest.getWorld();
+                if (w != null && w.isChunkLoaded(dest.getBlockX() >> 4, dest.getBlockZ() >> 4)) {
+                    allUnloaded = false; break;
+                }
+            }
+            if (allUnloaded) return;
+        }
 
         ItemStackAndInteger slot = CargoUtils.withdraw(network, inventories, inputNode.getBlock(), inputTarget);
         if (slot == null) return;
@@ -152,9 +143,9 @@ class CargoNetworkTask implements Runnable {
                     && !FoliaRegionHelper.isSameRegion(inputNode, output);
 
             if (crossRegion) {
-                // 跨区域：抽走物品，然后非阻塞派发到目标区域
-                dispatchCrossRegionInsert(item.clone(), inputNode, output, smartFill);
-                return null;
+                boolean dispatched = dispatchCrossRegionInsert(item.clone(), inputNode, output, smartFill);
+                if (!dispatched) return item; // 未派发 → 物品返回
+                return null; // 已派发 → 视为成功
             }
 
             Optional<Block> target = network.getAttachedBlock(output);
@@ -173,27 +164,20 @@ class CargoNetworkTask implements Runnable {
     }
 
     /**
-     * 跨区域插入：两级派发，无阻塞，无掉落。
-     *
-     * 1. 派发到输出区域线程 → 执行 insert
-     * 2. insert 失败 → 派发回输入区域线程 → 物品归还输入容器
-     *
-     * 所有派发均为火焰遗弃 (runSyncAtLocation)，不阻塞任何线程。
-     * 目标未加载时跳过（不取走物品）。
+     * @return true if dispatch was initiated, false if chunk not loaded (caller should return item)
      */
-    private void dispatchCrossRegionInsert(ItemStack item, Location sourceInput, Location output, boolean smartFill) {
+    private boolean dispatchCrossRegionInsert(ItemStack item, Location sourceInput, Location output, boolean smartFill) {
         World world = output.getWorld();
-        if (world == null) return;
+        if (world == null) return false;
 
         int cx = output.getBlockX() >> 4, cz = output.getBlockZ() >> 4;
-        if (!world.isChunkLoaded(cx, cz)) return;
+        if (!world.isChunkLoaded(cx, cz)) return false;
 
         Slimefun.runSyncAtLocation(() -> {
             try {
                 Optional<Block> target = network.getAttachedBlock(output);
                 if (target.isEmpty()) {
-                    returnItemToSource(item, sourceInput);
-                    return;
+                    returnItemToSource(item, sourceInput); return;
                 }
                 ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
                 ItemStack remainder = CargoUtils.insert(
@@ -202,25 +186,19 @@ class CargoNetworkTask implements Runnable {
                     returnItemToSource(remainder, sourceInput);
                 }
             } catch (Exception e) {
-                Slimefun.logger().log(Level.WARNING,
-                        "货网跨区域插入异常 @ {0}", new BlockPosition(output));
+                Slimefun.logger().log(Level.WARNING, "货网跨区域插入异常 @ {0}", new BlockPosition(output));
                 returnItemToSource(item, sourceInput);
             }
         }, output);
+        return true;
     }
 
-    /**
-     * 非阻塞归还物品到输入端容器。
-     * 派发到输入端所在区域线程执行。
-     * 如果输入端容器已满，溢出物品按原版规则处理（SpawnItem）。
-     */
     private void returnItemToSource(ItemStack item, Location sourceInput) {
         if (manager.isItemDeletionEnabled()) return;
         Slimefun.runSyncAtLocation(() -> {
             try {
                 Optional<Block> attached = network.getAttachedBlock(sourceInput);
                 if (attached.isEmpty()) return;
-                // 使用 insertItem 的完整逻辑（含溢出处理），避免刷物品
                 Inventory inv = inventories.get(sourceInput);
                 if (inv != null) {
                     ItemStack rest = Slimefun.getItemStackService()
