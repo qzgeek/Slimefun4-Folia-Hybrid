@@ -15,8 +15,10 @@ public class InventoryUtil {
             return;
         }
 
-        if (Bukkit.isPrimaryThread()) {
+        if (!Slimefun.isFolia() && Bukkit.isPrimaryThread()) {
             p.openInventory(inventory);
+        } else if (Slimefun.isFolia()) {
+            Slimefun.runSyncAtLocation(() -> p.openInventory(inventory), p.getLocation());
         } else {
             Slimefun.runSync(() -> p.openInventory(inventory));
         }
@@ -32,8 +34,15 @@ public class InventoryUtil {
             return;
         }
 
-        if (Bukkit.isPrimaryThread()) {
+        if (!Slimefun.isFolia() && Bukkit.isPrimaryThread()) {
             new LinkedList<>(inventory.getViewers()).forEach(HumanEntity::closeInventory);
+        } else if (Slimefun.isFolia()) {
+            // On Folia, close inventory on each viewer's region
+            for (HumanEntity viewer : new LinkedList<>(inventory.getViewers())) {
+                if (viewer instanceof Player p) {
+                    Slimefun.runSyncAtLocation(() -> p.closeInventory(), p.getLocation());
+                }
+            }
         } else {
             Slimefun.runSync(() -> new LinkedList<>(inventory.getViewers()).forEach(HumanEntity::closeInventory));
         }
@@ -42,8 +51,16 @@ public class InventoryUtil {
     public void closeInventory(Inventory inventory, Runnable callback) {
         closeInventory(inventory);
 
-        if (Bukkit.isPrimaryThread()) {
+        if (!Slimefun.isFolia() && Bukkit.isPrimaryThread()) {
             callback.run();
+        } else if (Slimefun.isFolia()) {
+            // For Folia, callback needs a location; use first viewer's location as context
+            var viewers = new LinkedList<>(inventory.getViewers());
+            if (!viewers.isEmpty() && viewers.getFirst() instanceof Player p) {
+                Slimefun.runSyncAtLocation(callback, p.getLocation());
+            } else {
+                Slimefun.runSync(callback);
+            }
         } else {
             Slimefun.runSync(callback);
         }
