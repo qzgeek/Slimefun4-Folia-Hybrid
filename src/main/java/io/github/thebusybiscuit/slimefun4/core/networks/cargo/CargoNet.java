@@ -88,7 +88,12 @@ public class CargoNet extends AbstractItemNetwork implements HologramOwner {
 
     @Override
     public NetworkComponent classifyLocation(@Nonnull Location l) {
-        var data = StorageCacheUtils.getBlock(l);
+        // 使用 force-load 版本，确保未加载区块中的节点数据也能被发现
+        // StorageCacheUtils.getBlock() 仅读缓存，重启后远端的网络节点会丢失
+        var data = Slimefun.getDatabaseManager().getBlockDataController().getBlockData(l);
+        if (data == null) {
+            data = StorageCacheUtils.getBlock(l);
+        }
 
         if (data == null) {
             return null;
