@@ -986,7 +986,7 @@ public class ProgrammableAndroid extends SlimefunItem
         Validate.notNull(b, "The Block cannot be null.");
 
         Optional<UUID> uuid =
-                TaskUtil.runSyncMethod(() -> Slimefun.getBlockDataService().getUniversalDataUUID(b));
+                TaskUtil.runSyncMethod(() -> Slimefun.getBlockDataService().getUniversalDataUUID(b), b.getLocation());
 
         if (uuid.isEmpty()) {
             throw new IllegalStateException("Android missing uuid");

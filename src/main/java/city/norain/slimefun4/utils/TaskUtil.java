@@ -16,7 +16,7 @@ import org.bukkit.entity.Entity;
 public class TaskUtil {
     @SneakyThrows
     public void runSyncMethod(Runnable runnable) {
-        if (Bukkit.isPrimaryThread()) {
+        if (!Slimefun.isFolia() && Bukkit.isPrimaryThread()) {
             runnable.run();
         } else {
             Slimefun.runSync(runnable);
@@ -45,12 +45,19 @@ public class TaskUtil {
                     ? callable.call()
                     : Bukkit.getScheduler()
                             .callSyncMethod(Slimefun.instance(), callable)
-                            .get(2, TimeUnit.SECONDS);
+                            .get(5, TimeUnit.SECONDS);
         }
 
-        final CompletableFuture<T> result = new CompletableFuture<>();
-
+        // On Folia: check if we're already on the correct thread to avoid deadlock
         if (l != null) {
+            try {
+                if (Slimefun.getFoliaLib().getScheduler().isOwnedByCurrentRegion(l)) {
+                    return callable.call();
+                }
+            } catch (Exception ignored) {
+                // Fall through to dispatch
+            }
+            final CompletableFuture<T> result = new CompletableFuture<>();
             Slimefun.getPlatformScheduler().runAtLocation(l, task -> {
                 try {
                     result.complete(callable.call());
@@ -58,26 +65,33 @@ public class TaskUtil {
                     result.completeExceptionally(e);
                 }
             });
-        } else {
-            if (entity != null) {
-                Slimefun.getPlatformScheduler().runAtEntity(entity, task -> {
-                    try {
-                        result.complete(callable.call());
-                    } catch (Exception e) {
-                        result.completeExceptionally(e);
-                    }
-                });
-            } else {
-                Slimefun.getPlatformScheduler().runNextTick(task -> {
-                    try {
-                        result.complete(callable.call());
-                    } catch (Exception e) {
-                        result.completeExceptionally(e);
-                    }
-                });
+            return result.get(5, TimeUnit.SECONDS);
+        } else if (entity != null) {
+            try {
+                if (Slimefun.getFoliaLib().getScheduler().isOwnedByCurrentRegion(entity)) {
+                    return callable.call();
+                }
+            } catch (Exception ignored) {
             }
+            final CompletableFuture<T> result = new CompletableFuture<>();
+            Slimefun.getPlatformScheduler().runAtEntity(entity, task -> {
+                try {
+                    result.complete(callable.call());
+                } catch (Exception e) {
+                    result.completeExceptionally(e);
+                }
+            });
+            return result.get(5, TimeUnit.SECONDS);
+        } else {
+            final CompletableFuture<T> result = new CompletableFuture<>();
+            Slimefun.getPlatformScheduler().runNextTick(task -> {
+                try {
+                    result.complete(callable.call());
+                } catch (Exception e) {
+                    result.completeExceptionally(e);
+                }
+            });
+            return result.get(5, TimeUnit.SECONDS);
         }
-
-        return result.get(2, TimeUnit.SECONDS);
     }
 }
