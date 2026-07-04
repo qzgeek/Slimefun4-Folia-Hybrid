@@ -129,68 +129,63 @@ class CargoNetworkTask implements Runnable {
         boolean roundrobin = blockData != null && "true".equals(blockData.getData("round-robin"));
         boolean smartFill = blockData != null && "true".equals(blockData.getData("smart-fill"));
 
-        int index = network.roundRobin.getOrDefault(inputNode, 0);
-        Deque<Location> tempDests = new ArrayDeque<>(outputNodes);
-        if (roundrobin) {
-            for (int i = 0; i < index && i < tempDests.size(); i++) {
-                tempDests.addLast(tempDests.removeFirst());
+        // Separate same-region and cross-region outputs
+        java.util.ArrayList<Location> sameRegion = new java.util.ArrayList<>();
+        java.util.ArrayList<Location> crossRegion = new java.util.ArrayList<>();
+        for (Location output : outputNodes) {
+            if (Slimefun.isFolia() && !FoliaRegionHelper.isSameRegion(inputNode, output)) {
+                crossRegion.add(output);
+            } else {
+                sameRegion.add(output);
             }
         }
 
+        int index = network.roundRobin.getOrDefault(inputNode, 0);
+        Deque<Location> tempDests = new ArrayDeque<>(sameRegion);
+        if (roundrobin) {
+            for (int i = 0; i < index && i < tempDests.size(); i++)
+                tempDests.addLast(tempDests.removeFirst());
+        }
+
+        // Phase 1: try same-region outputs (direct insert, can verify result)
         int outIdx = 0;
         for (Location output : tempDests) {
-            boolean crossRegion = Slimefun.isFolia()
-                    && !FoliaRegionHelper.isSameRegion(inputNode, output);
-
-            if (crossRegion) {
-                boolean dispatched = dispatchCrossRegionInsert(item.clone(), inputNode, output, smartFill);
-                if (!dispatched) return item; // 未派发 → 物品返回
-                return null; // 已派发 → 视为成功
-            }
-
             Optional<Block> target = network.getAttachedBlock(output);
             if (target.isEmpty()) { outIdx++; continue; }
 
             ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
             item = CargoUtils.insert(network, inventories, output.getBlock(), target.get(), smartFill, item, wrapper);
-
             if (item == null) {
-                if (roundrobin) network.roundRobin.put(inputNode, (outIdx + 1) % outputNodes.size());
+                if (roundrobin && outIdx < sameRegion.size())
+                    network.roundRobin.put(inputNode, (outIdx + 1) % outputNodes.size());
                 return null;
             }
             outIdx++;
         }
+
+        // Phase 2: same-region full → try cross-region (fire-and-forget)
+        for (Location output : crossRegion) {
+            World w = output.getWorld();
+            if (w == null) continue;
+            if (!w.isChunkLoaded(output.getBlockX() >> 4, output.getBlockZ() >> 4)) continue;
+
+            final ItemStack cloned = item.clone();
+            Slimefun.runSyncAtLocation(() -> {
+                try {
+                    Optional<Block> target = network.getAttachedBlock(output);
+                    if (target.isEmpty()) { returnItemToSource(cloned, inputNode); return; }
+                    ItemStackWrapper wrapper = ItemStackWrapper.wrap(cloned);
+                    ItemStack remainder = CargoUtils.insert(
+                            network, inventories, output.getBlock(), target.get(), smartFill, cloned, wrapper);
+                    if (remainder != null) returnItemToSource(remainder, inputNode);
+                } catch (Exception e) {
+                    returnItemToSource(cloned, inputNode);
+                }
+            }, output);
+            return null;
+        }
+
         return item;
-    }
-
-    /**
-     * @return true if dispatch was initiated, false if chunk not loaded (caller should return item)
-     */
-    private boolean dispatchCrossRegionInsert(ItemStack item, Location sourceInput, Location output, boolean smartFill) {
-        World world = output.getWorld();
-        if (world == null) return false;
-
-        int cx = output.getBlockX() >> 4, cz = output.getBlockZ() >> 4;
-        if (!world.isChunkLoaded(cx, cz)) return false;
-
-        Slimefun.runSyncAtLocation(() -> {
-            try {
-                Optional<Block> target = network.getAttachedBlock(output);
-                if (target.isEmpty()) {
-                    returnItemToSource(item, sourceInput); return;
-                }
-                ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
-                ItemStack remainder = CargoUtils.insert(
-                        network, inventories, output.getBlock(), target.get(), smartFill, item, wrapper);
-                if (remainder != null) {
-                    returnItemToSource(remainder, sourceInput);
-                }
-            } catch (Exception e) {
-                Slimefun.logger().log(Level.WARNING, "货网跨区域插入异常 @ {0}", new BlockPosition(output));
-                returnItemToSource(item, sourceInput);
-            }
-        }, output);
-        return true;
     }
 
     private void returnItemToSource(ItemStack item, Location sourceInput) {
