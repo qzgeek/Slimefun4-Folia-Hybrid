@@ -126,10 +126,19 @@ public class CargoNet extends AbstractItemNetwork implements HologramOwner {
 
         if (to == NetworkComponent.TERMINUS) {
             var data = StorageCacheUtils.getBlock(l);
-            switch (data.getSfId()) {
-                case "CARGO_NODE_INPUT" -> inputNodes.add(l);
-                case "CARGO_NODE_OUTPUT", "CARGO_NODE_OUTPUT_ADVANCED" -> outputNodes.add(l);
-                default -> {}
+            String sfId;
+            if (data != null) {
+                sfId = data.getSfId();
+            } else {
+                // 区块未加载，从数据库查询
+                sfId = Slimefun.getDatabaseManager().getBlockDataController().getBlockSfId(l);
+            }
+            if (sfId != null) {
+                switch (sfId) {
+                    case "CARGO_NODE_INPUT" -> inputNodes.add(l);
+                    case "CARGO_NODE_OUTPUT", "CARGO_NODE_OUTPUT_ADVANCED" -> outputNodes.add(l);
+                    default -> {}
+                }
             }
         }
     }
@@ -245,6 +254,16 @@ public class CargoNet extends AbstractItemNetwork implements HologramOwner {
     private static int getFrequency(@Nonnull Location node) {
         var data = StorageCacheUtils.getBlock(node);
         if (data == null) {
+            // 尝试从数据库强制加载（Folia 跨区域安全，不需要 chunk 访问）
+            try {
+                var sfId = Slimefun.getDatabaseManager().getBlockDataController().getBlockSfId(node);
+                if (sfId != null) {
+                    // 数据存在于数据库但不在缓存，返回默认频率0
+                    return 0;
+                }
+            } catch (Exception e) {
+                Slimefun.logger().log(Level.WARNING, "getFrequency 数据库查询失败 @ {0}", node);
+            }
             return -1;
         }
 
