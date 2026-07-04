@@ -132,21 +132,30 @@ class CargoNetworkTask implements Runnable {
 
         int outputIndex = 0;
         for (Location output : tempDestinations) {
+            boolean crossRegion = Slimefun.isFolia()
+                    && !FoliaRegionHelper.isSameRegion(inputNode, output);
+
+            if (crossRegion) {
+                // 跨区域：不在此处访问方块，交给 insertCrossRegion 在目标线程处理
+                item = insertCrossRegion(item, inputNode, output, smartFill);
+                if (item == null) {
+                    if (roundrobin) {
+                        network.roundRobin.put(inputNode, (outputIndex + 1) % outputNodes.size());
+                    }
+                    return null;
+                }
+                outputIndex++;
+                continue;
+            }
+
             Optional<Block> target = network.getAttachedBlock(output);
             if (target.isEmpty()) {
                 outputIndex++;
                 continue;
             }
 
-            boolean crossRegion = Slimefun.isFolia()
-                    && !FoliaRegionHelper.isSameRegion(inputNode, output);
-
-            if (crossRegion) {
-                item = insertCrossRegion(item, output, target.get(), smartFill);
-            } else {
-                ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
-                item = CargoUtils.insert(network, inventories, output.getBlock(), target.get(), smartFill, item, wrapper);
-            }
+            ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
+            item = CargoUtils.insert(network, inventories, output.getBlock(), target.get(), smartFill, item, wrapper);
 
             if (item == null) {
                 if (roundrobin) {
@@ -163,11 +172,12 @@ class CargoNetworkTask implements Runnable {
     /**
      * 跨区域插入物品。
      *
-     * 目标区域已加载：通过 runSyncAtLocation 派发到目标区域线程执行
-     * 目标区域未加载：静默跳过，视为节点不存在
+     * 目标区域已加载：通过 runSyncAtLocation 派发到目标区域线程执行。
+     * 在目标线程内获取 attachedBlock 和執行 insert，避免跨区域方块访问。
+     * 目标区域未加载：静默跳过。
      */
     @Nullable
-    private ItemStack insertCrossRegion(ItemStack item, Location output, Block targetBlock, boolean smartFill) {
+    private ItemStack insertCrossRegion(ItemStack item, Location inputNode, Location output, boolean smartFill) {
         World world = output.getWorld();
         if (world == null) return item;
 
@@ -181,8 +191,6 @@ class CargoNetworkTask implements Runnable {
         try {
             ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
 
-            // 检测当前线程是否拥有目标位置所在区域
-            // isTickThread 只能判断"在区域线程上"，判断不了"在对的区域线程上"
             boolean currentThreadOwnsTarget = false;
             try {
                 currentThreadOwnsTarget = Slimefun.getFoliaLib()
@@ -190,16 +198,23 @@ class CargoNetworkTask implements Runnable {
             } catch (Exception ignored) {}
 
             if (currentThreadOwnsTarget) {
-                // 当前线程就是目标区域的线程，直接执行
+                // 当前线程拥有目标区域，直接执行（包含 getAttachedBlock）
+                Optional<Block> target = network.getAttachedBlock(output);
+                if (target.isEmpty()) return item;
                 return CargoUtils.insert(network, inventories,
-                    output.getBlock(), targetBlock, smartFill, item, wrapper);
+                    output.getBlock(), target.get(), smartFill, item, wrapper);
             }
 
             CompletableFuture<ItemStack> future = new CompletableFuture<>();
             Slimefun.runSyncAtLocation(() -> {
                 try {
+                    Optional<Block> target = network.getAttachedBlock(output);
+                    if (target.isEmpty()) {
+                        future.complete(item);
+                        return;
+                    }
                     ItemStack result = CargoUtils.insert(
-                            network, inventories, output.getBlock(), targetBlock, smartFill, item, wrapper);
+                            network, inventories, output.getBlock(), target.get(), smartFill, item, wrapper);
                     future.complete(result);
                 } catch (Exception e) {
                     future.completeExceptionally(e);
