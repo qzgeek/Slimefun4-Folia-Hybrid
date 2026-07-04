@@ -39,13 +39,34 @@ import org.bukkit.Location;
  * The {@link TickerTask} is responsible for ticking every {@link BlockTicker},
  * synchronous or not.
  *
- * This is a hybrid version combining the correct Folia region scheduling
- * from Craft233MC with the concurrent thread pool execution from
- * SlimefunGuguProject.
+ * <h3>Folia 混合移植架构</h3>
+ * <p>
+ * 本版本融合了两种 Folia 调度策略:
+ * <ul>
+ *   <li><b>Craft233MC 调度:</b> 同步 ticker 使用 {@code runSyncAtLocation(location)}
+ *       确保在正确的 Folia 区域线程上执行方块操作。</li>
+ *   <li><b>SlimefunGuguProject 线程池:</b> 非同步通用 ticker 通过
+ *       {@link SlimefunPoolExecutor} 线程池并发执行, 提升 CPU 密集型 ticker 性能。</li>
+ * </ul>
+ *
+ * <h3>跨区域风险说明</h3>
+ * <p>
+ * Folia 将世界按 chunk 划分为独立区域, 每个区域由专用线程 tick。
+ * 以下场景可能触发区域边界问题:
+ * <ul>
+ *   <li><b>货网 (CargoNet) 跨区域:</b> 节点跨越区域边界时, {@code withdraw()} 和
+ *       {@code insert()} 可能在不同区域的容器上操作, 导致 {@code IllegalStateException}。</li>
+ *   <li><b>能网 (EnergyNet) 跨区域:</b> {@code HashMap} 在异步 tick 中无同步保护,
+ *       跨区域并发修改可能产生竞态条件。</li>
+ *   <li><b>实体生成 (spawnEntity):</b> 非同步 ticker 内部如未显式调用
+ *       {@code runSyncAtLocation} 包裹实体操作, 可能触发区域线程检查失败。</li>
+ * </ul>
+ * 这些问题主要影响大型跨区域网络, 单区域内正常使用不受影响。
  *
  * @author TheBusyBiscuit
- * @author Craft233MC
- * @author SlimefunGuguProject
+ * @author Craft233MC (Folia 区域调度)
+ * @author SlimefunGuguProject (线程池优化)
+ * @author qzgeek (混合移植)
  *
  * @see BlockTicker
  */

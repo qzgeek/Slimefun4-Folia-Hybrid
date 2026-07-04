@@ -1283,14 +1283,31 @@ public final class Slimefun extends JavaPlugin implements SlimefunAddon, ICompat
         return instance().threadService;
     }
 
+    /**
+     * 返回 FoliaLib 实例, 用于获取平台调度器。
+     *
+     * @return {@link FoliaLib} 实例
+     */
     public static FoliaLib getFoliaLib() {
         return foliaLib;
     }
 
+    /**
+     * 获取平台调度器的便捷方法。
+     * 内部调用 {@code foliaLib.getScheduler()}, 自动适配 Paper/Folia。
+     *
+     * @return {@link PlatformScheduler} 实例
+     */
     public static PlatformScheduler getPlatformScheduler() {
         return foliaLib.getScheduler();
     }
 
+    /**
+     * 检测当前是否运行在 Folia (或其分支) 上。
+     * 用于条件分支: Folia 上需要区域线程调度, Paper 上使用传统主线程。
+     *
+     * @return true 如果在 Folia 上运行
+     */
     public static boolean isFolia() {
         return foliaLib.isFolia();
     }

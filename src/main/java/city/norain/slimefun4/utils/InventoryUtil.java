@@ -8,6 +8,19 @@ import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 
+/**
+ * 物品栏操作工具类, 提供跨 Paper/Folia 的线程安全 openInventory/closeInventory。
+ *
+ * <h3>Folia 适配</h3>
+ * <p>
+ * Paper 上 {@code Bukkit.isPrimaryThread()} 判断主线程;
+ * Folia 上没有主线程, 此类使用 {@code Slimefun.isFolia()} 检测环境,
+ * 并通过 {@code runSyncAtLocation(player.getLocation())} 确保
+ * {@code player.openInventory()} 在玩家所在区域线程上执行。
+ *
+ * @author SlimefunGuguProject
+ * @author qzgeek (Folia 线程安全修复)
+ */
 @UtilityClass
 public class InventoryUtil {
     public void openInventory(Player p, Inventory inventory) {
