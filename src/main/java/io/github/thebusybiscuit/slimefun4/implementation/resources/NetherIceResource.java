@@ -1,0 +1,36 @@
+package io.github.thebusybiscuit.slimefun4.implementation.resources;
+
+import io.github.thebusybiscuit.slimefun4.api.geo.GEOResource;
+import io.github.thebusybiscuit.slimefun4.implementation.SlimefunItems;
+import io.github.thebusybiscuit.slimefun4.utils.biomes.BiomeMap;
+import org.bukkit.World.Environment;
+import org.bukkit.block.Biome;
+
+/**
+ * A {@link GEOResource} which consists of nether ice.
+ * It can only be found in the nether.
+ *
+ * @author TheBusyBiscuit
+ *
+ */
+class NetherIceResource extends AbstractResource {
+
+    private static final int DEFAULT_NETHER_VALUE = 32;
+
+    private final BiomeMap<Integer> biomes;
+
+    NetherIceResource() {
+        super("nether_ice", "下界冰", SlimefunItems.NETHER_ICE, 6, true);
+
+        biomes = getBiomeMap(this, "/biome-maps/nether_ice_v1.16.json");
+    }
+
+    @Override
+    public int getDefaultSupply(Environment environment, Biome biome) {
+        if (environment != Environment.NETHER) {
+            return 0;
+        } else {
+            return biomes.getOrDefault(biome, DEFAULT_NETHER_VALUE);
+        }
+    }
+}

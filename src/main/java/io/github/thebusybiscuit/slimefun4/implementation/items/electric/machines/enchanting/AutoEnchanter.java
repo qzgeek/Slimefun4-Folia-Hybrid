@@ -1,0 +1,194 @@
+package io.github.thebusybiscuit.slimefun4.implementation.items.electric.machines.enchanting;
+
+import io.github.thebusybiscuit.slimefun4.api.events.AsyncAutoEnchanterProcessEvent;
+import io.github.thebusybiscuit.slimefun4.api.events.AutoEnchantEvent;
+import io.github.thebusybiscuit.slimefun4.api.items.ItemGroup;
+import io.github.thebusybiscuit.slimefun4.api.items.ItemSetting;
+import io.github.thebusybiscuit.slimefun4.api.items.SlimefunItem;
+import io.github.thebusybiscuit.slimefun4.api.items.SlimefunItemStack;
+import io.github.thebusybiscuit.slimefun4.api.items.virtual.VirtualItemHandler.InventoryContext;
+import io.github.thebusybiscuit.slimefun4.api.recipes.RecipeType;
+import io.github.thebusybiscuit.slimefun4.implementation.Slimefun;
+import java.util.HashMap;
+import java.util.Map;
+import javax.annotation.Nullable;
+import javax.annotation.ParametersAreNonnullByDefault;
+import me.mrCookieSlime.Slimefun.Objects.SlimefunItem.abstractItems.MachineRecipe;
+import me.mrCookieSlime.Slimefun.api.inventory.BlockMenu;
+import org.bukkit.Bukkit;
+import org.bukkit.Material;
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.EnchantmentStorageMeta;
+
+/**
+ * The {@link AutoEnchanter}, in contrast to the {@link AutoDisenchanter}, adds
+ * {@link Enchantment Enchantments} from a given enchanted book and transfers them onto
+ * an {@link ItemStack}.
+ *
+ * @author TheBusyBiscuit
+ * @author Poslovitch
+ * @author Mooy1
+ * @author StarWishSama
+ * @author martinbrom
+ *
+ * @see AutoDisenchanter
+ *
+ */
+public class AutoEnchanter extends AbstractEnchantmentMachine {
+
+    private final ItemSetting<Boolean> overrideExistingEnchantsLvl =
+            new ItemSetting<>(this, "override-existing-enchants-lvl", false);
+
+    @ParametersAreNonnullByDefault
+    public AutoEnchanter(ItemGroup itemGroup, SlimefunItemStack item, RecipeType recipeType, ItemStack[] recipe) {
+        super(itemGroup, item, recipeType, recipe);
+
+        addItemSetting(overrideExistingEnchantsLvl);
+    }
+
+    @Override
+    public ItemStack getProgressBar() {
+        return new ItemStack(Material.GOLDEN_CHESTPLATE);
+    }
+
+    @Override
+    protected MachineRecipe findNextRecipe(BlockMenu menu) {
+        for (int slot : getInputSlots()) {
+            // Other item
+            int otherSlot = slot == getInputSlots()[0] ? getInputSlots()[1] : getInputSlots()[0];
+            ItemStack item = menu.getItemInSlot(otherSlot);
+
+            // Check if the item is enchantable
+            if (!isEnchantable(item)) {
+                continue;
+            }
+
+            // Call an event so other Plugins can modify it.
+            AutoEnchantEvent event = new AutoEnchantEvent(item, menu.getBlock());
+            Bukkit.getPluginManager().callEvent(event);
+
+            if (event.isCancelled()) {
+                if (Slimefun.getItemStackService()
+                        .fitAll(
+                                menu.toInventory(),
+                                new ItemStack[] {item},
+                                InventoryContext.MACHINE_OUTPUT,
+                                getOutputSlots())) {
+                    menu.replaceExistingItem(otherSlot, null);
+                    menu.pushItem(item, getOutputSlots());
+                }
+                return null;
+            }
+
+            ItemStack enchantedBook = menu.getItemInSlot(slot);
+
+            if (enchantedBook != null && enchantedBook.getType() == Material.ENCHANTED_BOOK) {
+                return enchant(menu, item, enchantedBook);
+            }
+        }
+
+        return null;
+    }
+
+    @Nullable @ParametersAreNonnullByDefault
+    protected MachineRecipe enchant(BlockMenu menu, ItemStack target, ItemStack enchantedBook) {
+        // Call an event so other Plugins can modify it.
+        AsyncAutoEnchanterProcessEvent event = new AsyncAutoEnchanterProcessEvent(target, enchantedBook, menu);
+        Bukkit.getPluginManager().callEvent(event);
+
+        if (event.isCancelled()) {
+            return null;
+        }
+
+        EnchantmentStorageMeta meta = (EnchantmentStorageMeta) enchantedBook.getItemMeta();
+        Map<Enchantment, Integer> enchantments = new HashMap<>();
+
+        if (!isEnchantmentCountAllowed(meta.getStoredEnchants().size())) {
+            showEnchantmentLimitWarning(menu);
+            return null;
+        }
+
+        // Find applicable enchantments
+        for (Map.Entry<Enchantment, Integer> entry : meta.getStoredEnchants().entrySet()) {
+            if (entry.getKey().canEnchantItem(target)) {
+                if (isEnchantmentLevelAllowed(entry.getValue())) {
+                    enchantments.put(entry.getKey(), entry.getValue());
+                    continue;
+                }
+
+                if (!menu.toInventory().getViewers().isEmpty()) {
+                    showEnchantmentLevelWarning(menu);
+                }
+
+                return null;
+            }
+        }
+
+        /*
+         * If override is false, remove those with lower level so we don't override existing enchants
+         * This also removes those with the same level so they aren't accounted for enchanting time
+         */
+        if (!overrideExistingEnchantsLvl.getValue()) {
+            enchantments.entrySet().removeIf(e -> target.getEnchantmentLevel(e.getKey()) >= e.getValue());
+        }
+
+        /*
+         * When maxEnchants is set to -1 it will be ignored. When it's set to 0 it will not allow any enchants to go
+         * on an item. When maxEnchants is set to any other value it will allow that many enchants to go on the item.
+         */
+        int preExistingEnchants = 0;
+        for (Map.Entry<Enchantment, Integer> entry : target.getEnchantments().entrySet()) {
+            if (meta.hasEnchant(entry.getKey())) {
+                preExistingEnchants++;
+            }
+        }
+
+        // Check if we found any valid enchantments
+        if (!enchantments.isEmpty()) {
+            ItemStack enchantedItem = target.clone();
+            enchantedItem.setAmount(1);
+            enchantedItem.addUnsafeEnchantments(enchantments);
+
+            MachineRecipe recipe = new MachineRecipe(
+                    75 * enchantments.size() / getSpeed(),
+                    new ItemStack[] {target, enchantedBook},
+                    new ItemStack[] {enchantedItem, new ItemStack(Material.BOOK)});
+
+            if (!Slimefun.getItemStackService()
+                    .fitAll(
+                            menu.toInventory(),
+                            recipe.getOutput(),
+                            InventoryContext.MACHINE_OUTPUT,
+                            getOutputSlots())) {
+                return null;
+            }
+
+            for (int inputSlot : getInputSlots()) {
+                menu.consumeItem(inputSlot);
+            }
+
+            return recipe;
+        } else {
+            return null;
+        }
+    }
+
+    private boolean isEnchantable(@Nullable ItemStack item) {
+        // stops endless checks of getByItem for enchanted book stacks.
+        if (item != null
+                && item.getType() != Material.ENCHANTED_BOOK
+                && !item.getType().isAir()
+                && !hasIgnoredLore(item)) {
+            SlimefunItem sfItem = SlimefunItem.getByItem(item);
+            return sfItem == null || sfItem.isEnchantable();
+        } else {
+            return false;
+        }
+    }
+
+    @Override
+    public String getMachineIdentifier() {
+        return "AUTO_ENCHANTER";
+    }
+}
