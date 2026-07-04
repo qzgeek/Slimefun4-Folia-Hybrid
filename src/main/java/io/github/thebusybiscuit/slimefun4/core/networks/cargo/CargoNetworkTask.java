@@ -169,47 +169,53 @@ class CargoNetworkTask implements Runnable {
             ItemFilter filter = network.filterCache.get(output);
             if (filter != null && !filter.test(item)) { outIdx++; continue; }
 
-            // 跨区域：派发到目标区域执行完整 insert (含 getAttachedBlock)
-            // attachedBlockCache 在派发中由目标区域线程首次填充
+            // 跨区域：火焰遗弃 + 退回保证，不阻塞管理器线程
+            // 单线程 Folia：调度到同一线程下一 tick，不会死锁
+            // 多线程 Folia：调度到目标区域线程，不同线程不阻塞
             final ItemStack toSend = item.clone();
-            final int savedIdx = outIdx;
-            try {
-                java.util.concurrent.CompletableFuture<ItemStack> future =
-                    new java.util.concurrent.CompletableFuture<>();
-                ItemStackWrapper wrapper = ItemStackWrapper.wrap(toSend);
-
-                Slimefun.runSyncAtLocation(() -> {
-                    try {
-                        // 在目标区域线程上获取节点和箱子（安全的方块访问）
-                        Block nodeBlock = output.getBlock();
-                        // 首次访问：填充 attachedBlockCache
-                        Optional<Block> target = network.getAttachedBlock(output);
-                        if (target.isEmpty()) { future.complete(toSend); return; }
-                        Block chestBlock = target.get();
-                        ItemStack remainder = CargoUtils.insert(network,
-                                inventories, nodeBlock, chestBlock, smartFill, toSend, wrapper);
-                        future.complete(remainder);
-                    } catch (Exception e) {
-                        future.completeExceptionally(e);
-                    }
-                }, output);
-
-                ItemStack remainder = future.get(5, java.util.concurrent.TimeUnit.SECONDS);
-                if (remainder == null) {
-                    if (roundrobin) network.roundRobin.put(inputNode,
-                            (savedIdx + 1) % outputNodes.size());
-                    return null;
+            Slimefun.runSyncAtLocation(() -> {
+                try {
+                    Optional<Block> target = network.getAttachedBlock(output);
+                    if (target.isEmpty()) { returnToSource(toSend, inputNode); return; }
+                    ItemStackWrapper wrapper = ItemStackWrapper.wrap(toSend);
+                    ItemStack remainder = CargoUtils.insert(network,
+                            inventories, output.getBlock(), target.get(), smartFill, toSend, wrapper);
+                    if (remainder != null) returnToSource(remainder, inputNode);
+                } catch (Exception e) {
+                    returnToSource(toSend, inputNode);
                 }
-                // 插入被拒绝 → 尝试下一个输出
-                item = remainder;
-            } catch (java.util.concurrent.TimeoutException e) {
-                return item;
-            } catch (Exception e) {
-                return item;
-            }
-            outIdx++;
+            }, output);
+
+            if (roundrobin) network.roundRobin.put(inputNode,
+                    (outIdx + 1) % outputNodes.size());
+            return null;
         }
         return item;
+    }
+
+    /**
+     * 非阻塞归还物品到输入端。火焰遗弃，不等待结果。
+     */
+    private void returnToSource(ItemStack item, Location sourceInput) {
+        if (manager.isItemDeletionEnabled()) return;
+        Slimefun.runSyncAtLocation(() -> {
+            try {
+                Optional<Block> attached = network.getAttachedBlock(sourceInput);
+                if (attached.isEmpty()) return;
+                Inventory inv = inventories.get(sourceInput);
+                if (inv != null) {
+                    ItemStack rest = Slimefun.getItemStackService()
+                        .addItem(inv, item, InventoryContext.CARGO_INSERT);
+                    if (rest != null && !manager.isItemDeletionEnabled()) {
+                        SlimefunUtils.spawnItem(sourceInput.clone().add(0, 1, 0),
+                                rest, ItemSpawnReason.CARGO_OVERFLOW);
+                    }
+                }
+            } catch (Exception e) {
+                Slimefun.logger().log(Level.WARNING,
+                        "货网跨区域归还异常 @ {0}", new BlockPosition(sourceInput));
+            }
+        }, sourceInput);
     }
 
     @ParametersAreNonnullByDefault

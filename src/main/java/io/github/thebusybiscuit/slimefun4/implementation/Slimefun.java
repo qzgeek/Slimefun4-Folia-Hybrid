@@ -1272,7 +1272,8 @@ public final class Slimefun extends JavaPlugin implements SlimefunAddon, ICompat
             return null;
         }
 
-        // Folia: 当前线程拥有目标区域 → 直接执行，避免排队死锁
+        // Folia: 当前线程拥有目标区域 → 直接执行
+        // 不拥有 → 派发到目标区域线程（多线程 Folia 上不同线程，不会死锁）
         if (Slimefun.isFolia() && city.norain.slimefun4.utils.TaskUtil.isTickThread()) {
             try {
                 if (Slimefun.getFoliaLib().getScheduler().isOwnedByCurrentRegion(loc)) {
