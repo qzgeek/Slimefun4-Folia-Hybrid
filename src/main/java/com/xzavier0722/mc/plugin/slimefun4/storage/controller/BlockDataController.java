@@ -478,6 +478,21 @@ public class BlockDataController extends ADataController {
      * @param l slimefun block location {@link Location}
      * @return {@link SlimefunBlockData}
      */
+
+    /**
+     * Query block SF ID directly from database without chunk access.
+     * Safe for Folia cross-region calls; does not call loc.getChunk().
+     */
+    @Nullable
+    public String getBlockSfId(Location l) {
+        checkDestroy();
+        var key = new RecordKey(DataScope.BLOCK_RECORD);
+        key.addCondition(FieldKey.LOCATION, LocationUtils.getLocKey(l));
+        key.addField(FieldKey.SLIMEFUN_ID);
+        var result = getData(key);
+        return result.isEmpty() ? null : result.get(0).get(FieldKey.SLIMEFUN_ID);
+    }
+
     @Nullable @ParametersAreNonnullByDefault
     public SlimefunBlockData getBlockData(Location l) {
         checkDestroy();

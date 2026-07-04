@@ -88,18 +88,26 @@ public class CargoNet extends AbstractItemNetwork implements HologramOwner {
 
     @Override
     public NetworkComponent classifyLocation(@Nonnull Location l) {
-        // 使用 force-load 版本，确保未加载区块中的节点数据也能被发现
-        // StorageCacheUtils.getBlock() 仅读缓存，重启后远端的网络节点会丢失
-        var data = Slimefun.getDatabaseManager().getBlockDataController().getBlockData(l);
-        if (data == null) {
-            data = StorageCacheUtils.getBlock(l);
+        // 先尝试缓存（安全，不触发 chunk 访问）
+        var data = StorageCacheUtils.getBlock(l);
+        if (data != null) {
+            return classifyById(data.getSfId());
         }
 
-        if (data == null) {
-            return null;
+        // 缓存未命中 → 直接 SQL 查询（不触发 chunk 访问，Folia 跨区域安全）
+        try {
+            var sfId = Slimefun.getDatabaseManager().getBlockDataController().getBlockSfId(l);
+            return classifyById(sfId);
+        } catch (Exception e) {
+            Slimefun.logger().log(Level.WARNING,
+                "货网 classifyLocation SQL 查询异常 @ {0}", l);
         }
+        return null;
+    }
 
-        return switch (data.getSfId()) {
+    private NetworkComponent classifyById(String sfId) {
+        if (sfId == null) return null;
+        return switch (sfId) {
             case "CARGO_MANAGER" -> NetworkComponent.REGULATOR;
             case "CARGO_NODE" -> NetworkComponent.CONNECTOR;
             case "CARGO_NODE_INPUT", "CARGO_NODE_OUTPUT", "CARGO_NODE_OUTPUT_ADVANCED" -> NetworkComponent.TERMINUS;
