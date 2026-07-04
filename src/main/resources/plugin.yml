@@ -5,7 +5,7 @@ version: FOLIA-HYBRID-${version}
 # Project metadata
 author: SlimefunGuguProject, Craft233MC, qzgeek
 description: Slimefun4 (粘液科技) 中文版 Folia 混合移植 — 融合 Craft233MC 的 Folia 调度与 SlimefunGuguProject 的线程池优化
-website: https://github.com/qzgeek/Slimefun4-Folia-Hybrid
+website: https://qzgeek.cn/slimefun4-folia
 folia-supported: true
 
 # Technical settings

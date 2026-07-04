@@ -87,8 +87,8 @@ public final class PostSetup {
         sender.sendMessage("");
 
         sender.sendMessage("");
+        sender.sendMessage(ChatColor.GREEN + " - 主页:      https://qzgeek.cn");
         sender.sendMessage(ChatColor.GREEN + " - 源码:      https://github.com/qzgeek/Slimefun4-Folia-Hybrid");
-        sender.sendMessage(ChatColor.GREEN + " - Bug 反馈:  https://github.com/qzgeek/Slimefun4-Folia-Hybrid/issues");
 
         if (Slimefun.isFolia()) {
             sender.sendMessage("");
