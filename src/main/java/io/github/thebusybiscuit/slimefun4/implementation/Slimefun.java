@@ -1286,6 +1286,10 @@ public final class Slimefun extends JavaPlugin implements SlimefunAddon, ICompat
         return foliaLib;
     }
 
+    public static PlatformScheduler getPlatformScheduler() {
+        return foliaLib.getScheduler();
+    }
+
     public static Collection<Entity> getNearbyEntities(
             final Location l, double x, double y, double z, final Predicate<Entity> filter) {
         final World world = l.getWorld();

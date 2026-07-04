@@ -110,9 +110,18 @@ public class TickerTask implements Runnable {
         this.tickRate = Slimefun.getCfg().getInt("URID.custom-ticker-delay");
 
         // Initialize thread pools for concurrent ticker execution (from GuguProject)
-        var initSize = Slimefun.getConfigManager().getAsyncTickerInitSize();
-        var maxSize = Slimefun.getConfigManager().getAsyncTickerMaxSize();
-        var poolSize = Slimefun.getConfigManager().getAsyncTickerQueueSize();
+        int initSize = 4;
+        int maxSize = 8;
+        int poolSize = 1024;
+        try {
+            var cfg = Slimefun.getConfigManager();
+            initSize = cfg.getAsyncTickerInitSize();
+            maxSize = cfg.getAsyncTickerMaxSize();
+            poolSize = cfg.getAsyncTickerQueueSize();
+        } catch (NoSuchMethodError e) {
+            // ConfigManager doesn't have async ticker methods yet; use defaults
+            Slimefun.logger().log(Level.INFO, "异步 Ticker 线程池使用默认配置 (init=4, max=8, queue=1024)");
+        }
 
         this.asyncTickerService = new SlimefunPoolExecutor(
                 "Slimefun-Ticker-Pool",
