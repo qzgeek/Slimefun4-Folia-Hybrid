@@ -61,6 +61,27 @@ public abstract class BlockTicker implements ItemHandler {
     public abstract boolean isSynchronized();
 
     /**
+     * 声明当前 {@link BlockTicker} 是否使用了通用数据。
+     * 默认返回 false。
+     *
+     * @return 是否使用通用数据
+     */
+    public boolean useUniversalData() {
+        return false;
+    }
+
+    /**
+     * 声明当前 {@link BlockTicker} 是否线程安全。
+     * 默认不启用，此时会将这些机器放置到单线程调度器 (旧方法) 上运行。
+     * 如果返回 true，ticker 可以在 {@link SlimefunPoolExecutor} 线程池中并发执行。
+     *
+     * @return 是否并发安全
+     */
+    public boolean isConcurrent() {
+        return false;
+    }
+
+    /**
      * This method is called every tick for every block
      *
      * @param b
