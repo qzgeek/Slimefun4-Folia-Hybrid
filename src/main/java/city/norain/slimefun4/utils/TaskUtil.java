@@ -14,9 +14,21 @@ import org.bukkit.entity.Entity;
 
 @UtilityClass
 public class TaskUtil {
+    /**
+     * Check if the current thread is a Folia region tick thread
+     * (on which block/entity operations are safe).
+     */
+    private static boolean isTickThread() {
+        if (!Slimefun.isFolia()) {
+            return Bukkit.isPrimaryThread();
+        }
+        String name = Thread.currentThread().getName();
+        return name.contains("Region Scheduler") || name.contains("TickThread");
+    }
+
     @SneakyThrows
     public void runSyncMethod(Runnable runnable) {
-        if (!Slimefun.isFolia() && Bukkit.isPrimaryThread()) {
+        if (isTickThread()) {
             runnable.run();
         } else {
             Slimefun.runSync(runnable);
@@ -25,21 +37,34 @@ public class TaskUtil {
 
     @SneakyThrows
     public <T> T runSyncMethod(@Nonnull Callable<T> callable) {
-        return runSyncMethod(callable, null, null);
+        // When no location is provided on Folia, try to execute directly
+        // if we're on a tick thread; otherwise dispatch via runNextTick
+        if (isTickThread()) {
+            return callable.call();
+        }
+        if (!Slimefun.isFolia()) {
+            return Bukkit.getScheduler()
+                    .callSyncMethod(Slimefun.instance(), callable)
+                    .get(5, TimeUnit.SECONDS);
+        }
+        final CompletableFuture<T> result = new CompletableFuture<>();
+        Slimefun.getPlatformScheduler().runNextTick(task -> {
+            try {
+                result.complete(callable.call());
+            } catch (Exception e) {
+                result.completeExceptionally(e);
+            }
+        });
+        return result.get(10, TimeUnit.SECONDS);
     }
 
     @SneakyThrows
     public <T> T runSyncMethod(@Nonnull Callable<T> callable, @Nonnull Location l) {
-        return runSyncMethod(callable, l, null);
-    }
-
-    @SneakyThrows
-    public <T> T runSyncMethod(@Nonnull Callable<T> callable, @Nonnull Entity entity) {
-        return runSyncMethod(callable, null, entity);
-    }
-
-    @SneakyThrows
-    private <T> T runSyncMethod(@Nonnull Callable<T> callable, @Nullable Location l, @Nullable Entity entity) {
+        // On Folia: if we're on a region tick thread, execute directly
+        // to avoid dispatching to ourselves and deadlocking
+        if (Slimefun.isFolia() && isTickThread()) {
+            return callable.call();
+        }
         if (!Slimefun.isFolia()) {
             return Bukkit.isPrimaryThread()
                     ? callable.call()
@@ -47,51 +72,37 @@ public class TaskUtil {
                             .callSyncMethod(Slimefun.instance(), callable)
                             .get(5, TimeUnit.SECONDS);
         }
+        final CompletableFuture<T> result = new CompletableFuture<>();
+        Slimefun.getPlatformScheduler().runAtLocation(l, task -> {
+            try {
+                result.complete(callable.call());
+            } catch (Exception e) {
+                result.completeExceptionally(e);
+            }
+        });
+        return result.get(10, TimeUnit.SECONDS);
+    }
 
-        // On Folia: check if we're already on the correct thread to avoid deadlock
-        if (l != null) {
-            try {
-                if (Slimefun.getFoliaLib().getScheduler().isOwnedByCurrentRegion(l)) {
-                    return callable.call();
-                }
-            } catch (Exception ignored) {
-                // Fall through to dispatch
-            }
-            final CompletableFuture<T> result = new CompletableFuture<>();
-            Slimefun.getPlatformScheduler().runAtLocation(l, task -> {
-                try {
-                    result.complete(callable.call());
-                } catch (Exception e) {
-                    result.completeExceptionally(e);
-                }
-            });
-            return result.get(5, TimeUnit.SECONDS);
-        } else if (entity != null) {
-            try {
-                if (Slimefun.getFoliaLib().getScheduler().isOwnedByCurrentRegion(entity)) {
-                    return callable.call();
-                }
-            } catch (Exception ignored) {
-            }
-            final CompletableFuture<T> result = new CompletableFuture<>();
-            Slimefun.getPlatformScheduler().runAtEntity(entity, task -> {
-                try {
-                    result.complete(callable.call());
-                } catch (Exception e) {
-                    result.completeExceptionally(e);
-                }
-            });
-            return result.get(5, TimeUnit.SECONDS);
-        } else {
-            final CompletableFuture<T> result = new CompletableFuture<>();
-            Slimefun.getPlatformScheduler().runNextTick(task -> {
-                try {
-                    result.complete(callable.call());
-                } catch (Exception e) {
-                    result.completeExceptionally(e);
-                }
-            });
-            return result.get(5, TimeUnit.SECONDS);
+    @SneakyThrows
+    public <T> T runSyncMethod(@Nonnull Callable<T> callable, @Nonnull Entity entity) {
+        if (Slimefun.isFolia() && isTickThread()) {
+            return callable.call();
         }
+        if (!Slimefun.isFolia()) {
+            return Bukkit.isPrimaryThread()
+                    ? callable.call()
+                    : Bukkit.getScheduler()
+                            .callSyncMethod(Slimefun.instance(), callable)
+                            .get(5, TimeUnit.SECONDS);
+        }
+        final CompletableFuture<T> result = new CompletableFuture<>();
+        Slimefun.getPlatformScheduler().runAtEntity(entity, task -> {
+            try {
+                result.complete(callable.call());
+            } catch (Exception e) {
+                result.completeExceptionally(e);
+            }
+        });
+        return result.get(10, TimeUnit.SECONDS);
     }
 }
