@@ -41,7 +41,7 @@ public class TaskUtil {
      * Check if the current thread is a Folia region tick thread
      * (on which block/entity operations are safe).
      */
-    private static boolean isTickThread() {
+    public static boolean isTickThread() {
         if (!Slimefun.isFolia()) {
             return Bukkit.isPrimaryThread();
         }

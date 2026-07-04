@@ -1250,6 +1250,12 @@ public final class Slimefun extends JavaPlugin implements SlimefunAddon, ICompat
             return null;
         }
 
+        // Folia: 已在区域线程上 → 直接执行
+        if (Slimefun.isFolia() && city.norain.slimefun4.utils.TaskUtil.isTickThread()) {
+            runnable.run();
+            return null;
+        }
+
         return Slimefun.getFoliaLib().getScheduler().runAtEntityLater(e, runnable, 1);
     }
 
@@ -1264,6 +1270,16 @@ public final class Slimefun extends JavaPlugin implements SlimefunAddon, ICompat
 
         if (instance == null || !instance.isEnabled()) {
             return null;
+        }
+
+        // Folia: 当前线程拥有目标区域 → 直接执行，避免排队死锁
+        if (Slimefun.isFolia() && city.norain.slimefun4.utils.TaskUtil.isTickThread()) {
+            try {
+                if (Slimefun.getFoliaLib().getScheduler().isOwnedByCurrentRegion(loc)) {
+                    runnable.run();
+                    return null;
+                }
+            } catch (Exception ignored) {}
         }
 
         return Slimefun.getFoliaLib().getScheduler().runAtLocationLater(loc, runnable, 1);

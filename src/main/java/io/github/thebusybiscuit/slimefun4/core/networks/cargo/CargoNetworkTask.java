@@ -1,6 +1,7 @@
 package io.github.thebusybiscuit.slimefun4.core.networks.cargo;
 
 import city.norain.slimefun4.utils.FoliaRegionHelper;
+import city.norain.slimefun4.utils.TaskUtil;
 import com.xzavier0722.mc.plugin.slimefun4.storage.util.StorageCacheUtils;
 import io.github.bakedlibs.dough.blocks.BlockPosition;
 import io.github.thebusybiscuit.slimefun4.api.items.ItemSpawnReason;
@@ -178,9 +179,23 @@ class CargoNetworkTask implements Runnable {
         }
 
         try {
-            CompletableFuture<ItemStack> future = new CompletableFuture<>();
             ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
 
+            // 检测当前线程是否拥有目标位置所在区域
+            // isTickThread 只能判断"在区域线程上"，判断不了"在对的区域线程上"
+            boolean currentThreadOwnsTarget = false;
+            try {
+                currentThreadOwnsTarget = Slimefun.getFoliaLib()
+                    .getScheduler().isOwnedByCurrentRegion(output);
+            } catch (Exception ignored) {}
+
+            if (currentThreadOwnsTarget) {
+                // 当前线程就是目标区域的线程，直接执行
+                return CargoUtils.insert(network, inventories,
+                    output.getBlock(), targetBlock, smartFill, item, wrapper);
+            }
+
+            CompletableFuture<ItemStack> future = new CompletableFuture<>();
             Slimefun.runSyncAtLocation(() -> {
                 try {
                     ItemStack result = CargoUtils.insert(
