@@ -9,6 +9,7 @@ import com.xzavier0722.mc.plugin.slimefun4.storage.migrator.PlayerProfileMigrato
 import com.xzavier0722.mc.plugin.slimefuncomplib.ICompatibleSlimefun;
 import io.github.bakedlibs.dough.config.Config;
 import io.github.bakedlibs.dough.folialib.FoliaLib;
+import io.github.bakedlibs.dough.folialib.impl.PlatformScheduler;
 import io.github.bakedlibs.dough.folialib.wrapper.task.WrappedTask;
 import io.github.bakedlibs.dough.protection.ProtectionManager;
 import io.github.thebusybiscuit.slimefun4.api.MinecraftVersion;
@@ -1288,6 +1289,10 @@ public final class Slimefun extends JavaPlugin implements SlimefunAddon, ICompat
 
     public static PlatformScheduler getPlatformScheduler() {
         return foliaLib.getScheduler();
+    }
+
+    public static boolean isFolia() {
+        return foliaLib.isFolia();
     }
 
     public static Collection<Entity> getNearbyEntities(
