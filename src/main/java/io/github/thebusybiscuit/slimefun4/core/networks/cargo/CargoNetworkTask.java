@@ -156,8 +156,8 @@ class CargoNetworkTask implements Runnable {
         ItemStack item = stack;
 
         var blockData = StorageCacheUtils.getBlock(inputNode);
-        boolean roundrobin = Objects.equals(blockData.getData("round-robin"), "true");
-        boolean smartFill = Objects.equals(blockData.getData("smart-fill"), "true");
+        boolean roundrobin = blockData != null && "true".equals(blockData.getData("round-robin"));
+        boolean smartFill = blockData != null && "true".equals(blockData.getData("smart-fill"));
 
         int index = 0;
         Collection<Location> destinations;
@@ -180,6 +180,12 @@ class CargoNetworkTask implements Runnable {
         }
 
         for (Location output : destinations) {
+            // Folia: 跨区域输出暂不支持，跳过避免 "Cannot read world" 崩溃
+            if (Slimefun.isFolia() && !FoliaRegionHelper.isSameRegion(inputNode, output)) {
+                index++;
+                continue;
+            }
+
             Optional<Block> target = network.getAttachedBlock(output);
 
             if (target.isPresent()) {
