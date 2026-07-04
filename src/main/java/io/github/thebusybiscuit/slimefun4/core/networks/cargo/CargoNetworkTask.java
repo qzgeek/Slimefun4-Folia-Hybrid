@@ -128,6 +128,7 @@ class CargoNetworkTask implements Runnable {
 
         var blockData = StorageCacheUtils.getBlock(inputNode);
         boolean roundrobin = blockData != null && "true".equals(blockData.getData("round-robin"));
+        boolean smartFill = blockData != null && "true".equals(blockData.getData("smart-fill"));
 
         int index = network.roundRobin.getOrDefault(inputNode, 0);
         Deque<Location> sorted = new ArrayDeque<>(outputNodes);
@@ -149,7 +150,7 @@ class CargoNetworkTask implements Runnable {
                 if (target.isEmpty()) { outIdx++; continue; }
                 ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
                 item = CargoUtils.insert(network, inventories,
-                        output.getBlock(), target.get(), false, item, wrapper);
+                        output.getBlock(), target.get(), smartFill, item, wrapper);
                 if (item == null) {
                     if (roundrobin) network.roundRobin.put(inputNode,
                             (outIdx + 1) % outputNodes.size());
@@ -190,10 +191,11 @@ class CargoNetworkTask implements Runnable {
 
                 Slimefun.runSyncAtLocation(() -> {
                     try {
-                        Block chest = finalChestLoc.getBlock();
+                        // 在目标区域线程上获取节点和箱子（安全的方块访问）
+                        Block nodeBlock = output.getBlock();
+                        Block chestBlock = finalChestLoc.getBlock();
                         ItemStack remainder = CargoUtils.insert(network,
-                                inventories, finalChestLoc.getBlock(),
-                                chest, false, toSend, wrapper);
+                                inventories, nodeBlock, chestBlock, smartFill, toSend, wrapper);
                         future.complete(remainder);
                     } catch (Exception e) {
                         future.completeExceptionally(e);
