@@ -11,6 +11,7 @@ import io.github.thebusybiscuit.slimefun4.implementation.Slimefun;
 import io.github.thebusybiscuit.slimefun4.implementation.SlimefunItems;
 import io.github.thebusybiscuit.slimefun4.utils.SlimefunUtils;
 import io.github.thebusybiscuit.slimefun4.utils.itemstack.ItemStackWrapper;
+import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
@@ -127,53 +128,61 @@ class CargoNetworkTask implements Runnable {
 
         var blockData = StorageCacheUtils.getBlock(inputNode);
         boolean roundrobin = blockData != null && "true".equals(blockData.getData("round-robin"));
-        boolean smartFill = blockData != null && "true".equals(blockData.getData("smart-fill"));
-
-        // Separate same-region and cross-region outputs
-        java.util.ArrayList<Location> sameRegion = new java.util.ArrayList<>();
-        java.util.ArrayList<Location> crossRegion = new java.util.ArrayList<>();
-        for (Location output : outputNodes) {
-            if (Slimefun.isFolia() && !FoliaRegionHelper.isSameRegion(inputNode, output)) {
-                crossRegion.add(output);
-            } else {
-                sameRegion.add(output);
-            }
-        }
 
         int index = network.roundRobin.getOrDefault(inputNode, 0);
-        Deque<Location> tempDests = new ArrayDeque<>(sameRegion);
+        Deque<Location> sorted = new ArrayDeque<>(outputNodes);
         if (roundrobin) {
-            for (int i = 0; i < index && i < tempDests.size(); i++)
-                tempDests.addLast(tempDests.removeFirst());
+            for (int i = 0; i < index && i < sorted.size(); i++)
+                sorted.addLast(sorted.removeFirst());
         }
 
-        // Phase 1: try same-region outputs (direct insert, can verify result)
         int outIdx = 0;
-        for (Location output : tempDests) {
-            Optional<Block> target = network.getAttachedBlock(output);
-            if (target.isEmpty()) { outIdx++; continue; }
-
-            ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
-            item = CargoUtils.insert(network, inventories, output.getBlock(), target.get(), smartFill, item, wrapper);
-            if (item == null) {
-                if (roundrobin && outIdx < sameRegion.size())
-                    network.roundRobin.put(inputNode, (outIdx + 1) % outputNodes.size());
-                return null;
-            }
-            outIdx++;
-        }
-
-        // Phase 2: same-region full → try cross-region (同步等待)
-        int crossIdx = 0;
-        for (Location output : crossRegion) {
+        for (Location output : sorted) {
+            boolean crossRegion = Slimefun.isFolia()
+                    && !FoliaRegionHelper.isSameRegion(inputNode, output);
             World w = output.getWorld();
-            if (w == null) continue;
-            if (!w.isChunkLoaded(output.getBlockX() >> 4, output.getBlockZ() >> 4)) continue;
+            if (w == null) { outIdx++; continue; }
 
-            // 多线程 Folia：manager 线程等 target 线程，不同线程不死锁
-            // 单线程 Folia：runSyncAtLocation 内置 isOwnedByCurrentRegion 短路，直接执行
+            // 同区域：直接插入
+            if (!crossRegion) {
+                Optional<Block> target = network.getAttachedBlock(output);
+                if (target.isEmpty()) { outIdx++; continue; }
+                ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
+                item = CargoUtils.insert(network, inventories,
+                        output.getBlock(), target.get(), false, item, wrapper);
+                if (item == null) {
+                    if (roundrobin) network.roundRobin.put(inputNode,
+                            (outIdx + 1) % outputNodes.size());
+                    return null;
+                }
+                outIdx++;
+                continue;
+            }
+
+            // 跨区域：路由决策在管理器线程，仅派发 insert
+            if (!w.isChunkLoaded(output.getBlockX() >> 4, output.getBlockZ() >> 4)) {
+                outIdx++; continue;
+            }
+
+            // 用 filterCache 做路由决策（纯内存，不碰方块）
+            ItemFilter filter = network.filterCache.get(output);
+            if (filter != null && !filter.test(item)) { outIdx++; continue; }
+
+            // 获取目标箱子位置（从 attachedBlockCache 或 getAttachedBlock）
+            Location chestLoc = network.attachedBlockCache.get(output);
+            if (chestLoc == null) {
+                Optional<Block> target = network.getAttachedBlock(output);
+                if (target.isEmpty()) { outIdx++; continue; }
+                chestLoc = target.get().getLocation();
+            }
+            if (!w.isChunkLoaded(chestLoc.getBlockX() >> 4, chestLoc.getBlockZ() >> 4)) {
+                outIdx++; continue;
+            }
+
+            // 路由决策完成，派发到目标区域执行 insert
             final ItemStack toSend = item.clone();
-            final int savedOutIdx = crossIdx;
+            final Location finalChestLoc = chestLoc;
+            final int savedIdx = outIdx;
             try {
                 java.util.concurrent.CompletableFuture<ItemStack> future =
                     new java.util.concurrent.CompletableFuture<>();
@@ -181,11 +190,10 @@ class CargoNetworkTask implements Runnable {
 
                 Slimefun.runSyncAtLocation(() -> {
                     try {
-                        Optional<Block> target = network.getAttachedBlock(output);
-                        if (target.isEmpty()) { future.complete(toSend); return; }
-                        ItemStack remainder = CargoUtils.insert(
-                                network, inventories, output.getBlock(), target.get(),
-                                smartFill, toSend, wrapper);
+                        Block chest = finalChestLoc.getBlock();
+                        ItemStack remainder = CargoUtils.insert(network,
+                                inventories, finalChestLoc.getBlock(),
+                                chest, false, toSend, wrapper);
                         future.complete(remainder);
                     } catch (Exception e) {
                         future.completeExceptionally(e);
@@ -194,51 +202,20 @@ class CargoNetworkTask implements Runnable {
 
                 ItemStack remainder = future.get(5, java.util.concurrent.TimeUnit.SECONDS);
                 if (remainder == null) {
-                    // 插入成功
                     if (roundrobin) network.roundRobin.put(inputNode,
-                            (sameRegion.size() + savedOutIdx + 1) % outputNodes.size());
+                            (savedIdx + 1) % outputNodes.size());
                     return null;
                 }
-                // remainder != null → 输出拒绝/满 → 尝试下一个跨区域输出
+                // 插入被拒绝 → 尝试下一个输出
                 item = remainder;
             } catch (java.util.concurrent.TimeoutException e) {
-                // 超时：物品退回输入端，不丢
-                Slimefun.logger().log(Level.WARNING,
-                        "货网跨区域传输超时 @ {0}", new BlockPosition(output));
-                returnItemToSourceSync(inputNode, item);
-                return null;
+                return item;
             } catch (Exception e) {
-                returnItemToSourceSync(inputNode, item);
-                return null;
+                return item;
             }
-            crossIdx++;
+            outIdx++;
         }
-
         return item;
-    }
-
-    /**
-     * 同步归还物品到输入端（在当前线程上执行）。
-     * 用于跨区域传输失败后的回退。
-     */
-    private void returnItemToSourceSync(Location sourceInput, ItemStack item) {
-        if (manager.isItemDeletionEnabled()) return;
-        try {
-            Optional<Block> attached = network.getAttachedBlock(sourceInput);
-            if (attached.isEmpty()) return;
-            Inventory inv = inventories.get(sourceInput);
-            if (inv != null) {
-                ItemStack rest = Slimefun.getItemStackService()
-                    .addItem(inv, item, InventoryContext.CARGO_INSERT);
-                if (rest != null && !manager.isItemDeletionEnabled()) {
-                    SlimefunUtils.spawnItem(sourceInput.clone().add(0, 1, 0),
-                            rest, ItemSpawnReason.CARGO_OVERFLOW);
-                }
-            }
-        } catch (Exception e) {
-            Slimefun.logger().log(Level.WARNING,
-                    "货网跨区域归还异常 @ {0}", new BlockPosition(sourceInput));
-        }
     }
 
     @ParametersAreNonnullByDefault

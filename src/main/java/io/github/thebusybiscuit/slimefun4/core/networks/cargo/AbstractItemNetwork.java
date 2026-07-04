@@ -36,6 +36,13 @@ abstract class AbstractItemNetwork extends Network {
     protected Map<Location, BlockFace> connectorCache = new HashMap<>();
 
     /**
+     * Cache of node location → attached block location (chest behind the node).
+     * Populated on first getAttachedBlock call, used for Folia cross-region routing.
+     * Storing Location avoids Block.getBlock() → getNMS() which requires region thread.
+     */
+    protected Map<Location, Location> attachedBlockCache = new HashMap<>();
+
+    /**
      * This is our cache for the {@link ItemFilter} for each node.
      */
     protected Map<Location, ItemFilter> filterCache = new HashMap<>();
@@ -52,13 +59,24 @@ abstract class AbstractItemNetwork extends Network {
                 BlockFace cached = connectorCache.get(l);
 
                 if (cached != null) {
-                    return Optional.of(block.getRelative(cached));
+                    Block attached = block.getRelative(cached);
+                    attachedBlockCache.put(l, attached.getLocation());
+                    return Optional.of(attached);
                 }
 
                 BlockFace face =
                         ((Directional) block.getBlockData()).getFacing().getOppositeFace();
                 connectorCache.put(l, face);
-                return Optional.of(block.getRelative(face));
+                Block attached = block.getRelative(face);
+                attachedBlockCache.put(l, attached.getLocation());
+                return Optional.of(attached);
+            }
+        } else {
+            // Chunk not loaded, try the Location cache (Folia cross-region)
+            Location cached = attachedBlockCache.get(l);
+            if (cached != null && cached.getWorld().isChunkLoaded(
+                    cached.getBlockX() >> 4, cached.getBlockZ() >> 4)) {
+                return Optional.of(cached.getBlock());
             }
         }
 
