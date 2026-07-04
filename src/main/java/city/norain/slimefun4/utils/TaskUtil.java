@@ -68,8 +68,13 @@ public class TaskUtil {
                     }
                 });
             } else {
-                throw new IllegalArgumentException(
-                        "Location or entity must be provided when executing sync task on Folia!");
+                Slimefun.getPlatformScheduler().runNextTick(task -> {
+                    try {
+                        result.complete(callable.call());
+                    } catch (Exception e) {
+                        result.completeExceptionally(e);
+                    }
+                });
             }
         }
 
