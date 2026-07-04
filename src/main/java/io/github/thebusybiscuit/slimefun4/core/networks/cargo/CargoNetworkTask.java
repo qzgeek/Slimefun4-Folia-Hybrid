@@ -169,20 +169,9 @@ class CargoNetworkTask implements Runnable {
             ItemFilter filter = network.filterCache.get(output);
             if (filter != null && !filter.test(item)) { outIdx++; continue; }
 
-            // 获取目标箱子位置（从 attachedBlockCache 或 getAttachedBlock）
-            Location chestLoc = network.attachedBlockCache.get(output);
-            if (chestLoc == null) {
-                Optional<Block> target = network.getAttachedBlock(output);
-                if (target.isEmpty()) { outIdx++; continue; }
-                chestLoc = target.get().getLocation();
-            }
-            if (!w.isChunkLoaded(chestLoc.getBlockX() >> 4, chestLoc.getBlockZ() >> 4)) {
-                outIdx++; continue;
-            }
-
-            // 路由决策完成，派发到目标区域执行 insert
+            // 跨区域：派发到目标区域执行完整 insert (含 getAttachedBlock)
+            // attachedBlockCache 在派发中由目标区域线程首次填充
             final ItemStack toSend = item.clone();
-            final Location finalChestLoc = chestLoc;
             final int savedIdx = outIdx;
             try {
                 java.util.concurrent.CompletableFuture<ItemStack> future =
@@ -193,7 +182,10 @@ class CargoNetworkTask implements Runnable {
                     try {
                         // 在目标区域线程上获取节点和箱子（安全的方块访问）
                         Block nodeBlock = output.getBlock();
-                        Block chestBlock = finalChestLoc.getBlock();
+                        // 首次访问：填充 attachedBlockCache
+                        Optional<Block> target = network.getAttachedBlock(output);
+                        if (target.isEmpty()) { future.complete(toSend); return; }
+                        Block chestBlock = target.get();
                         ItemStack remainder = CargoUtils.insert(network,
                                 inventories, nodeBlock, chestBlock, smartFill, toSend, wrapper);
                         future.complete(remainder);
