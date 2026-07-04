@@ -20,27 +20,29 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import javax.annotation.Nullable;
 import javax.annotation.ParametersAreNonnullByDefault;
 import me.mrCookieSlime.Slimefun.api.inventory.DirtyChestMenu;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 
 /**
- * The {@link CargoNetworkTask} is the actual {@link Runnable} responsible for moving {@link ItemStack ItemStacks}
+ * The {@link CargoNetworkTask} is responsible for moving {@link ItemStack ItemStacks}
  * around the {@link CargoNet}.
  *
- * Inbefore this was just a method in the {@link CargoNet} class.
- * However for aesthetic reasons but mainly to prevent the Cargo Task from showing up as
- * "lambda:xyz-123" in timing reports... this was moved.
+ * <h3>Folia 跨区域支持</h3>
+ * 目标区域已加载时，通过 {@code runSyncAtLocation} 派发插入操作到目标区域线程；
+ * 目标区域未加载时，跳过并记录警告日志。
  *
- * @see CargoNet
- * @see CargoUtils
- * @see AbstractItemNetwork
- *
+ * @author TheBusyBiscuit
+ * @author qzgeek (Folia 跨区域改造)
  */
 class CargoNetworkTask implements Runnable {
 
@@ -51,11 +53,13 @@ class CargoNetworkTask implements Runnable {
     private final Map<Location, Integer> inputs;
     private final Map<Integer, List<Location>> outputs;
 
+    /** 跨区域操作超时（秒） */
+    private static final int CROSS_REGION_TIMEOUT = 3;
+
     @ParametersAreNonnullByDefault
     CargoNetworkTask(CargoNet network, Map<Location, Integer> inputs, Map<Integer, List<Location>> outputs) {
         this.network = network;
         this.manager = Slimefun.getNetworkManager();
-
         this.inputs = inputs;
         this.outputs = outputs;
     }
@@ -65,56 +69,34 @@ class CargoNetworkTask implements Runnable {
         long timestamp = System.nanoTime();
 
         try {
-            /**
-             * All operations happen here: Everything gets iterated from the Input Nodes.
-             * (Apart from ChestTerminal Buses)
-             */
             SlimefunItem inputNode = SlimefunItems.CARGO_INPUT_NODE.getItem();
             for (Map.Entry<Location, Integer> entry : inputs.entrySet()) {
                 long nodeTimestamp = System.nanoTime();
                 Location input = entry.getKey();
                 Optional<Block> attachedBlock = network.getAttachedBlock(input);
 
-                attachedBlock.ifPresent(block -> routeItems(input, block, entry.getValue(), outputs));
+                attachedBlock.ifPresent(block -> routeItems(input, block, entry.getValue()));
 
-                // This will prevent this timings from showing up for the Cargo Manager
                 timestamp += Slimefun.getProfiler().closeEntry(entry.getKey(), inputNode, nodeTimestamp);
             }
         } catch (Exception | LinkageError x) {
             Slimefun.logger()
-                    .log(
-                            Level.SEVERE,
-                            x,
-                            () -> "An Exception was caught while ticking a Cargo network @ "
-                                    + new BlockPosition(network.getRegulator()));
+                    .log(Level.SEVERE, x,
+                            () -> "货网 tick 异常 @ " + new BlockPosition(network.getRegulator()));
         }
 
-        // Submit a timings report
         Slimefun.getProfiler().closeEntry(network.getRegulator(), SlimefunItems.CARGO_MANAGER.getItem(), timestamp);
     }
 
     @ParametersAreNonnullByDefault
-    private void routeItems(
-            Location inputNode, Block inputTarget, int frequency, Map<Integer, List<Location>> outputNodes) {
-
-        // Folia: skip if any output is in a different region
-        // (cross-region CargoNet will be handled by TransferDispatcher in a future update)
-        List<Location> destinations = outputNodes.get(frequency);
-        if (destinations != null && Slimefun.isFolia()) {
-            boolean hasCrossRegion = false;
-            for (Location dest : destinations) {
-                if (!FoliaRegionHelper.isSameRegion(inputNode, dest)) {
-                    hasCrossRegion = true;
-                    break;
-                }
-            }
-            if (hasCrossRegion) {
-                return; // Skip: cross-region not yet supported
-            }
+    private void routeItems(Location inputNode, Block inputTarget, int frequency) {
+        List<Location> destinations = outputs.get(frequency);
+        if (destinations == null || destinations.isEmpty()) {
+            return;
         }
 
+        // 从输入容器取物品
         ItemStackAndInteger slot = CargoUtils.withdraw(network, inventories, inputNode.getBlock(), inputTarget);
-
         if (slot == null) {
             return;
         }
@@ -122,12 +104,98 @@ class CargoNetworkTask implements Runnable {
         ItemStack stack = slot.getItem();
         int previousSlot = slot.getInt();
 
-        if (destinations != null) {
-            stack = distributeItem(stack, inputNode, destinations);
-        }
+        // 分发到输出节点
+        stack = distributeItem(stack, inputNode, destinations);
 
+        // 没塞进去的退回去
         if (stack != null) {
             insertItem(inputTarget, previousSlot, stack);
+        }
+    }
+
+    @Nullable @ParametersAreNonnullByDefault
+    private ItemStack distributeItem(ItemStack stack, Location inputNode, List<Location> outputNodes) {
+        ItemStack item = stack;
+
+        var blockData = StorageCacheUtils.getBlock(inputNode);
+        boolean roundrobin = blockData != null && "true".equals(blockData.getData("round-robin"));
+        boolean smartFill = blockData != null && "true".equals(blockData.getData("smart-fill"));
+
+        int index = network.roundRobin.getOrDefault(inputNode, 0);
+        Deque<Location> tempDestinations = new ArrayDeque<>(outputNodes);
+        if (roundrobin) {
+            for (int i = 0; i < index && i < tempDestinations.size(); i++) {
+                tempDestinations.addLast(tempDestinations.removeFirst());
+            }
+        }
+
+        int outputIndex = 0;
+        for (Location output : tempDestinations) {
+            Optional<Block> target = network.getAttachedBlock(output);
+            if (target.isEmpty()) {
+                outputIndex++;
+                continue;
+            }
+
+            boolean crossRegion = Slimefun.isFolia()
+                    && !FoliaRegionHelper.isSameRegion(inputNode, output);
+
+            if (crossRegion) {
+                item = insertCrossRegion(item, output, target.get(), smartFill);
+            } else {
+                ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
+                item = CargoUtils.insert(network, inventories, output.getBlock(), target.get(), smartFill, item, wrapper);
+            }
+
+            if (item == null) {
+                if (roundrobin) {
+                    network.roundRobin.put(inputNode, (outputIndex + 1) % outputNodes.size());
+                }
+                return null;
+            }
+            outputIndex++;
+        }
+
+        return item;
+    }
+
+    /**
+     * 跨区域插入物品。
+     *
+     * 目标区域已加载：通过 runSyncAtLocation 派发到目标区域线程执行
+     * 目标区域未加载：静默跳过，视为节点不存在
+     */
+    @Nullable
+    private ItemStack insertCrossRegion(ItemStack item, Location output, Block targetBlock, boolean smartFill) {
+        World world = output.getWorld();
+        if (world == null) return item;
+
+        int chunkX = output.getBlockX() >> 4;
+        int chunkZ = output.getBlockZ() >> 4;
+
+        if (!world.isChunkLoaded(chunkX, chunkZ)) {
+            return item;
+        }
+
+        try {
+            CompletableFuture<ItemStack> future = new CompletableFuture<>();
+            ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
+
+            Slimefun.runSyncAtLocation(() -> {
+                try {
+                    ItemStack result = CargoUtils.insert(
+                            network, inventories, output.getBlock(), targetBlock, smartFill, item, wrapper);
+                    future.complete(result);
+                } catch (Exception e) {
+                    future.completeExceptionally(e);
+                }
+            }, output);
+
+            return future.get(CROSS_REGION_TIMEOUT, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            Slimefun.logger().log(Level.WARNING, "货网跨区域传输异常, 物品退回: {0} @ {1}",
+                    new Object[]{item.getType(), output});
+            return item;
         }
     }
 
@@ -137,25 +205,20 @@ class CargoNetworkTask implements Runnable {
 
         if (inv != null) {
             ItemStack rest;
-
-            // Check if the original slot hasn't been occupied in the meantime
             if (inv.getItem(previousSlot) == null) {
                 rest = Slimefun.getItemStackService().addItem(inv, item, InventoryContext.CARGO_INSERT, previousSlot);
                 if (rest != null) {
                     rest = Slimefun.getItemStackService().addItem(inv, rest, InventoryContext.CARGO_INSERT);
                 }
             } else {
-                // Try to add the item into another available slot then
                 rest = Slimefun.getItemStackService().addItem(inv, item, InventoryContext.CARGO_INSERT);
             }
 
             if (rest != null && !manager.isItemDeletionEnabled()) {
-                // If the item still couldn't be inserted, simply drop it on the ground
                 SlimefunUtils.spawnItem(inputTarget.getLocation().add(0, 1, 0), rest, ItemSpawnReason.CARGO_OVERFLOW);
             }
         } else {
             DirtyChestMenu menu = CargoUtils.getChestMenu(inputTarget);
-
             if (menu != null) {
                 if (menu.getItemInSlot(previousSlot) == null) {
                     menu.replaceExistingItem(previousSlot, item);
@@ -163,75 +226,6 @@ class CargoNetworkTask implements Runnable {
                     SlimefunUtils.spawnItem(
                             inputTarget.getLocation().add(0, 1, 0), item, ItemSpawnReason.CARGO_OVERFLOW);
                 }
-            }
-        }
-    }
-
-    @Nullable @ParametersAreNonnullByDefault
-    private ItemStack distributeItem(ItemStack stack, Location inputNode, List<Location> outputNodes) {
-        ItemStack item = stack;
-
-        var blockData = StorageCacheUtils.getBlock(inputNode);
-        boolean roundrobin = Objects.equals(blockData.getData("round-robin"), "true");
-        boolean smartFill = Objects.equals(blockData.getData("smart-fill"), "true");
-
-        int index = 0;
-        Collection<Location> destinations;
-        if (roundrobin) {
-            // The current round-robin index of the (unsorted) outputNodes list,
-            // or the index at which to start searching for valid output nodes
-            index = network.roundRobin.getOrDefault(inputNode, 0);
-            // Use an ArrayDeque to perform round-robin sorting
-            // Since the impl for roundRobinSort just does Deque.addLast(Deque#removeFirst)
-            // An ArrayDequeue is preferable as opposed to a LinkedList:
-            // - The number of elements does not change.
-            // - ArrayDequeue has better iterative performance
-            Deque<Location> tempDestinations = new ArrayDeque<>(outputNodes);
-            roundRobinSort(index, tempDestinations);
-            destinations = tempDestinations;
-        } else {
-            // Using an ArrayList here since we won't need to sort the destinations
-            // The ArrayList has the best performance for iteration bar a primitive array
-            destinations = new ArrayList<>(outputNodes);
-        }
-
-        for (Location output : destinations) {
-            Optional<Block> target = network.getAttachedBlock(output);
-
-            if (target.isPresent()) {
-                ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
-                item = CargoUtils.insert(
-                        network, inventories, output.getBlock(), target.get(), smartFill, item, wrapper);
-
-                if (item == null) {
-                    if (roundrobin) {
-                        // The output was valid, set the round robin index to the node after this one
-                        network.roundRobin.put(inputNode, (index + 1) % outputNodes.size());
-                    }
-                    break;
-                }
-            }
-            index++;
-        }
-
-        return item;
-    }
-
-    /**
-     * This method sorts a given {@link Deque} of output node locations using a semi-accurate
-     * round-robin method.
-     *
-     * @param index
-     *            The round-robin index of the input node
-     * @param outputNodes
-     *            A {@link Deque} of {@link Location Locations} of the output nodes
-     */
-    private void roundRobinSort(int index, Deque<Location> outputNodes) {
-        if (index < outputNodes.size()) {
-            // Not ideal but actually not bad performance-wise over more elegant alternatives
-            for (int i = 0; i < index; i++) {
-                Location temp = outputNodes.removeFirst();
-                outputNodes.add(temp);
             }
         }
     }
