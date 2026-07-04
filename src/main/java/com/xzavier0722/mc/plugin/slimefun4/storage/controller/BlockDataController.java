@@ -356,6 +356,10 @@ public class BlockDataController extends ADataController {
         invSnapshots.remove(removed.getKey());
 
         if (!removed.isDataLoaded()) {
+            // Data not yet loaded — still need to remove from database.
+            // Folia async loading may cause this; without this fix,
+            // broken cargo nodes leave ghost entries that block re-placement.
+            removeBlockDirectly(l);
             return;
         }
 
