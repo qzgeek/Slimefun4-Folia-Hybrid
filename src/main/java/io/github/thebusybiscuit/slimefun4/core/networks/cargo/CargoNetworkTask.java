@@ -152,8 +152,8 @@ class CargoNetworkTask implements Runnable {
                     && !FoliaRegionHelper.isSameRegion(inputNode, output);
 
             if (crossRegion) {
-                // 跨区域：火焰遗弃，不等待
-                fireAndForgetInsert(item.clone(), output, smartFill);
+                // 跨区域：抽走物品，然后非阻塞派发到目标区域
+                dispatchCrossRegionInsert(item.clone(), inputNode, output, smartFill);
                 return null;
             }
 
@@ -173,41 +173,66 @@ class CargoNetworkTask implements Runnable {
     }
 
     /**
-     * 跨区域插入：派发到目标区域线程执行，火焰遗弃不等待。
-     * 目标未加载时静默跳过，物品掉落在输入端附近。
+     * 跨区域插入：两级派发，无阻塞，无掉落。
+     *
+     * 1. 派发到输出区域线程 → 执行 insert
+     * 2. insert 失败 → 派发回输入区域线程 → 物品归还输入容器
+     *
+     * 所有派发均为火焰遗弃 (runSyncAtLocation)，不阻塞任何线程。
+     * 目标未加载时跳过（不取走物品）。
      */
-    private void fireAndForgetInsert(ItemStack item, Location output, boolean smartFill) {
+    private void dispatchCrossRegionInsert(ItemStack item, Location sourceInput, Location output, boolean smartFill) {
         World world = output.getWorld();
-        if (world == null) { dropAtSource(item, null); return; }
+        if (world == null) return;
 
         int cx = output.getBlockX() >> 4, cz = output.getBlockZ() >> 4;
-        if (!world.isChunkLoaded(cx, cz)) { dropAtSource(item, null); return; }
+        if (!world.isChunkLoaded(cx, cz)) return;
 
         Slimefun.runSyncAtLocation(() -> {
             try {
                 Optional<Block> target = network.getAttachedBlock(output);
-                if (target.isEmpty()) { dropAtSource(item, output); return; }
-
+                if (target.isEmpty()) {
+                    returnItemToSource(item, sourceInput);
+                    return;
+                }
                 ItemStackWrapper wrapper = ItemStackWrapper.wrap(item);
-                ItemStack result = CargoUtils.insert(
+                ItemStack remainder = CargoUtils.insert(
                         network, inventories, output.getBlock(), target.get(), smartFill, item, wrapper);
-
-                if (result != null && !manager.isItemDeletionEnabled()) {
-                    output.getWorld().dropItemNaturally(output, result);
+                if (remainder != null) {
+                    returnItemToSource(remainder, sourceInput);
                 }
             } catch (Exception e) {
-                Slimefun.logger().log(Level.WARNING, "货网跨区域插入异常 @ {0}", new BlockPosition(output));
-                dropAtSource(item, output);
+                Slimefun.logger().log(Level.WARNING,
+                        "货网跨区域插入异常 @ {0}", new BlockPosition(output));
+                returnItemToSource(item, sourceInput);
             }
         }, output);
     }
 
-    private void dropAtSource(ItemStack item, @Nullable Location target) {
+    /**
+     * 非阻塞归还物品到输入端容器。
+     * 派发到输入端所在区域线程执行。
+     * 如果输入端容器已满，溢出物品按原版规则处理（SpawnItem）。
+     */
+    private void returnItemToSource(ItemStack item, Location sourceInput) {
         if (manager.isItemDeletionEnabled()) return;
-        try {
-            network.getRegulator().getWorld()
-                    .dropItemNaturally(network.getRegulator(), item);
-        } catch (Exception ignored) {}
+        Slimefun.runSyncAtLocation(() -> {
+            try {
+                Optional<Block> attached = network.getAttachedBlock(sourceInput);
+                if (attached.isEmpty()) return;
+                // 使用 insertItem 的完整逻辑（含溢出处理），避免刷物品
+                Inventory inv = inventories.get(sourceInput);
+                if (inv != null) {
+                    ItemStack rest = Slimefun.getItemStackService()
+                        .addItem(inv, item, InventoryContext.CARGO_INSERT);
+                    if (rest != null && !manager.isItemDeletionEnabled()) {
+                        SlimefunUtils.spawnItem(sourceInput.clone().add(0, 1, 0), rest, ItemSpawnReason.CARGO_OVERFLOW);
+                    }
+                }
+            } catch (Exception e) {
+                Slimefun.logger().log(Level.WARNING, "货网跨区域归还物品异常 @ {0}", new BlockPosition(sourceInput));
+            }
+        }, sourceInput);
     }
 
     @ParametersAreNonnullByDefault
