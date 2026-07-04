@@ -1,5 +1,7 @@
 package io.github.thebusybiscuit.slimefun4.implementation.tasks;
 
+import city.norain.slimefun4.utils.SlimefunPoolExecutor;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.xzavier0722.mc.plugin.slimefun4.storage.controller.ASlimefunDataContainer;
 import com.xzavier0722.mc.plugin.slimefun4.storage.controller.SlimefunBlockData;
 import com.xzavier0722.mc.plugin.slimefun4.storage.controller.SlimefunUniversalData;
@@ -18,6 +20,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
@@ -33,10 +39,15 @@ import org.bukkit.Location;
  * The {@link TickerTask} is responsible for ticking every {@link BlockTicker},
  * synchronous or not.
  *
+ * This is a hybrid version combining the correct Folia region scheduling
+ * from Craft233MC with the concurrent thread pool execution from
+ * SlimefunGuguProject.
+ *
  * @author TheBusyBiscuit
+ * @author Craft233MC
+ * @author SlimefunGuguProject
  *
  * @see BlockTicker
- *
  */
 public class TickerTask implements Runnable {
 
@@ -52,21 +63,78 @@ public class TickerTask implements Runnable {
      */
     private final Map<BlockPosition, Integer> bugs = new ConcurrentHashMap<>();
 
-    private int tickRate;
-    private boolean halted = false;
-    private boolean running = false;
+    private final ThreadFactory tickerThreadFactory = new ThreadFactoryBuilder()
+            .setNameFormat("SF-Ticker-%d")
+            .setDaemon(true)
+            .setUncaughtExceptionHandler(
+                    (t, e) -> Slimefun.logger().log(Level.SEVERE, e, () -> "tick 时发生异常 (@" + t.getName() + ")"))
+            .build();
 
+    /**
+     * 负责并发运行部分可异步的 Tick 任务的 {@link ExecutorService} 实例。
+     * 来自 SlimefunGuguProject 的线程池优化。
+     */
+    private ExecutorService asyncTickerService;
+
+    /**
+     * 当异步线程池满载时，回退到单线程顺序执行。
+     */
+    private ExecutorService fallbackTickerService;
+
+    private int tickRate;
+
+    /**
+     * 该标记代表 TickerTask 已被终止。
+     */
+    private volatile boolean halted = false;
+
+    /**
+     * 该标记代表 TickerTask 正在运行。
+     */
+    private volatile boolean running = false;
+
+    /**
+     * 该标记代表 TickerTask 暂时被暂停。
+     */
     @Setter
     private volatile boolean paused = false;
 
     /**
      * This method starts the {@link TickerTask} on an asynchronous schedule.
+     * Initializes concurrent thread pools for non-synchronized tickers.
      *
      * @param plugin
      *            The instance of our {@link Slimefun}
      */
     public void start(@Nonnull Slimefun plugin) {
         this.tickRate = Slimefun.getCfg().getInt("URID.custom-ticker-delay");
+
+        // Initialize thread pools for concurrent ticker execution (from GuguProject)
+        var initSize = Slimefun.getConfigManager().getAsyncTickerInitSize();
+        var maxSize = Slimefun.getConfigManager().getAsyncTickerMaxSize();
+        var poolSize = Slimefun.getConfigManager().getAsyncTickerQueueSize();
+
+        this.asyncTickerService = new SlimefunPoolExecutor(
+                "Slimefun-Ticker-Pool",
+                Math.max(1, initSize - 1),
+                Math.max(1, maxSize - 1),
+                1,
+                TimeUnit.MINUTES,
+                new LinkedBlockingQueue<>(poolSize),
+                tickerThreadFactory,
+                (r, e) -> {
+                    // 任务队列已满，使用备用的单线程池执行该任务
+                    fallbackTickerService.submit(r);
+                });
+
+        this.fallbackTickerService = new SlimefunPoolExecutor(
+                "Slimefun-Ticker-Fallback-Service",
+                1,
+                1,
+                0,
+                TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(),
+                tickerThreadFactory);
 
         PlatformScheduler scheduler = Slimefun.getFoliaLib().getScheduler();
         scheduler.runTimerAsync(this, 100L, tickRate);
@@ -145,6 +213,15 @@ public class TickerTask implements Runnable {
         }
     }
 
+    /**
+     * Tick a standard (non-universal) location.
+     * 
+     * Uses Craft233's correct Folia scheduling:
+     * - Synchronized tickers are dispatched via runSyncAtLocation(location) 
+     *   to ensure they execute on the correct region thread.
+     * - Non-synchronized tickers execute directly (they must handle their
+     *   own thread safety via internal runSyncAtLocation calls).
+     */
     private void tickLocation(@Nonnull Set<BlockTicker> tickers, @Nonnull Location l) {
         var blockData = StorageCacheUtils.getBlock(l);
         if (blockData == null || !blockData.isDataLoaded() || blockData.isPendingRemove()) {
@@ -166,6 +243,9 @@ public class TickerTask implements Runnable {
                     /**
                      * We are inserting a new timestamp because synchronized actions
                      * are always ran with a 50ms delay (1 game tick)
+                     *
+                     * IMPORTANT: Uses runSyncAtLocation to ensure correct Folia
+                     * region thread dispatch.
                      */
                     Slimefun.runSyncAtLocation(
                             () -> {
@@ -192,6 +272,13 @@ public class TickerTask implements Runnable {
         }
     }
 
+    /**
+     * Tick a universal block location (from GuguProject with thread pool enhancement).
+     * 
+     * Non-synchronized tickers are submitted to the thread pool for
+     * concurrent execution. On Folia, block operations inside the ticker
+     * are dispatched to the correct region via runAtLocation.
+     */
     @ParametersAreNonnullByDefault
     private void tickUniversalLocation(UUID uuid, Location l, @Nonnull Set<BlockTicker> tickers) {
         var data = StorageCacheUtils.getUniversalBlock(uuid);
@@ -207,10 +294,6 @@ public class TickerTask implements Runnable {
                     Slimefun.getProfiler().scheduleEntries(1);
                     item.getBlockTicker().update();
 
-                    /**
-                     * We are inserting a new timestamp because synchronized actions
-                     * are always ran with a 50ms delay (1 game tick)
-                     */
                     Slimefun.runSyncAtLocation(
                             () -> {
                                 if (data.isPendingRemove()) {
@@ -222,15 +305,30 @@ public class TickerTask implements Runnable {
                 } else {
                     long timestamp = Slimefun.getProfiler().newEntry();
                     item.getBlockTicker().update();
-                    tickBlock(l, item, data, timestamp);
+
+                    // Thread pool dispatch for non-synchronized tickers
+                    // (from GuguProject — allows CPU-bound tickers to run concurrently)
+                    Runnable func = () -> {
+                        try {
+                            tickBlock(l, item, data, timestamp);
+                        } catch (Exception x) {
+                            Slimefun.runSyncAtLocation(
+                                    () -> reportErrors(l, item, x),
+                                    l);
+                        }
+                    };
+
+                    if (item.getBlockTicker().isConcurrent()) {
+                        asyncTickerService.execute(func);
+                    } else {
+                        fallbackTickerService.execute(func);
+                    }
                 }
 
                 tickers.add(item.getBlockTicker());
             } catch (Exception x) {
                 Slimefun.runSyncAtLocation(
-                        () -> {
-                            reportErrors(l, item, x);
-                        },
+                        () -> reportErrors(l, item, x),
                         l);
             }
         }
