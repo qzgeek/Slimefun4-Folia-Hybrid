@@ -247,7 +247,13 @@ public abstract class ADataController {
         }
 
         if (callback.runOnMainThread()) {
-            Slimefun.runSync(cb);
+            if (Slimefun.isFolia() && result instanceof SlimefunBlockData blockData) {
+                Slimefun.runSyncAtLocation(cb, blockData.getLocation());
+            } else if (Slimefun.isFolia() && result instanceof SlimefunUniversalBlockData ubd) {
+                Slimefun.runSyncAtLocation(cb, ubd.getLastPresent().toLocation());
+            } else {
+                Slimefun.runSync(cb);
+            }
         } else {
             callbackExecutor.submit(cb);
         }
