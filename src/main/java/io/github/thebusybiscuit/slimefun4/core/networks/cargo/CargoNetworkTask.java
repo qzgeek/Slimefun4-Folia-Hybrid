@@ -1,5 +1,6 @@
 package io.github.thebusybiscuit.slimefun4.core.networks.cargo;
 
+import city.norain.slimefun4.utils.FoliaRegionHelper;
 import com.xzavier0722.mc.plugin.slimefun4.storage.util.StorageCacheUtils;
 import io.github.bakedlibs.dough.blocks.BlockPosition;
 import io.github.thebusybiscuit.slimefun4.api.items.ItemSpawnReason;
@@ -95,6 +96,23 @@ class CargoNetworkTask implements Runnable {
     @ParametersAreNonnullByDefault
     private void routeItems(
             Location inputNode, Block inputTarget, int frequency, Map<Integer, List<Location>> outputNodes) {
+
+        // Folia: skip if any output is in a different region
+        // (cross-region CargoNet will be handled by TransferDispatcher in a future update)
+        List<Location> destinations = outputNodes.get(frequency);
+        if (destinations != null && Slimefun.isFolia()) {
+            boolean hasCrossRegion = false;
+            for (Location dest : destinations) {
+                if (!FoliaRegionHelper.isSameRegion(inputNode, dest)) {
+                    hasCrossRegion = true;
+                    break;
+                }
+            }
+            if (hasCrossRegion) {
+                return; // Skip: cross-region not yet supported
+            }
+        }
+
         ItemStackAndInteger slot = CargoUtils.withdraw(network, inventories, inputNode.getBlock(), inputTarget);
 
         if (slot == null) {
@@ -103,7 +121,6 @@ class CargoNetworkTask implements Runnable {
 
         ItemStack stack = slot.getItem();
         int previousSlot = slot.getInt();
-        List<Location> destinations = outputNodes.get(frequency);
 
         if (destinations != null) {
             stack = distributeItem(stack, inputNode, destinations);

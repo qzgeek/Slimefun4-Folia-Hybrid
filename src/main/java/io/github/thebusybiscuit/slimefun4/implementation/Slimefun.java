@@ -446,6 +446,9 @@ public final class Slimefun extends JavaPlugin implements SlimefunAddon, ICompat
         hologramsService.start();
         ticker.start(this);
 
+        // Folia 跨区域传输调度器
+        city.norain.slimefun4.utils.TransferTickTask.start();
+
         logger.log(Level.INFO, "正在加载第三方插件支持...");
         integrations.start();
 
@@ -488,6 +491,9 @@ public final class Slimefun extends JavaPlugin implements SlimefunAddon, ICompat
 
         SlimefunExtended.shutdown();
         getSQLProfiler().shutdown();
+
+        // Folia 跨区域传输调度器
+        city.norain.slimefun4.utils.TransferTickTask.stop();
 
         // Cancel all tasks from this plugin immediately
         getFoliaLib().getScheduler().cancelAllTasks();
